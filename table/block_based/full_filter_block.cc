@@ -11,7 +11,6 @@
 #include "port/port.h"
 #include "rocksdb/filter_policy.h"
 #include "table/block_based/block_based_table_reader.h"
-#include "test_util/testharness.h"
 #include "util/coding.h"
 
 namespace ROCKSDB_NAMESPACE {
@@ -192,7 +191,6 @@ void FullFilterBlockReader::KeysMayMatch(
     uint64_t block_offset, const bool no_io,
     BlockCacheLookupContext* lookup_context) {
 #ifdef NDEBUG
-  (void)range;
   (void)block_offset;
 #endif
   assert(block_offset == kNotValid);
@@ -209,7 +207,6 @@ void FullFilterBlockReader::PrefixesMayMatch(
     uint64_t block_offset, const bool no_io,
     BlockCacheLookupContext* lookup_context) {
 #ifdef NDEBUG
-  (void)range;
   (void)block_offset;
 #endif
   assert(block_offset == kNotValid);

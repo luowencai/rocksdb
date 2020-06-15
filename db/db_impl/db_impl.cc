@@ -870,9 +870,7 @@ void DBImpl::DumpStats() {
 Status DBImpl::TablesRangeTombstoneSummary(ColumnFamilyHandle* column_family,
                                            int max_entries_to_print,
                                            std::string* out_str) {
-  auto* cfh =
-      static_cast_with_check<ColumnFamilyHandleImpl, ColumnFamilyHandle>(
-          column_family);
+  auto* cfh = static_cast_with_check<ColumnFamilyHandleImpl>(column_family);
   ColumnFamilyData* cfd = cfh->cfd();
 
   SuperVersion* super_version = cfd->GetReferencedSuperVersion(this);
@@ -1529,11 +1527,19 @@ Status DBImpl::GetImpl(const ReadOptions& read_options, const Slice& key,
                        GetImplOptions& get_impl_options) {
   assert(get_impl_options.value != nullptr ||
          get_impl_options.merge_operands != nullptr);
-  // We will eventually support deadline for Get requests too, but safeguard
-  // for now
-  if (read_options.deadline != std::chrono::microseconds::zero()) {
-    return Status::NotSupported("ReadOptions deadline is not supported");
+
+#ifndef NDEBUG
+  assert(get_impl_options.column_family);
+  ColumnFamilyHandle* cf = get_impl_options.column_family;
+  const Comparator* const ucmp = cf->GetComparator();
+  assert(ucmp);
+  if (ucmp->timestamp_size() > 0) {
+    assert(read_options.timestamp);
+    assert(read_options.timestamp->size() == ucmp->timestamp_size());
+  } else {
+    assert(!read_options.timestamp);
   }
+#endif  // NDEBUG
 
   PERF_CPU_TIMER_GUARD(get_cpu_nanos, env_);
   StopWatch sw(env_, stats_, DB_GET);
@@ -1710,7 +1716,7 @@ std::vector<Status> DBImpl::MultiGet(
     const std::vector<ColumnFamilyHandle*>& column_family,
     const std::vector<Slice>& keys, std::vector<std::string>* values) {
   return MultiGet(read_options, column_family, keys, values,
-                  /*timestamps*/ nullptr);
+                  /*timestamps=*/nullptr);
 }
 
 std::vector<Status> DBImpl::MultiGet(
@@ -1721,6 +1727,20 @@ std::vector<Status> DBImpl::MultiGet(
   PERF_CPU_TIMER_GUARD(get_cpu_nanos, env_);
   StopWatch sw(env_, stats_, DB_MULTIGET);
   PERF_TIMER_GUARD(get_snapshot_time);
+
+#ifndef NDEBUG
+  for (const auto* cfh : column_family) {
+    assert(cfh);
+    const Comparator* const ucmp = cfh->GetComparator();
+    assert(ucmp);
+    if (ucmp->timestamp_size() > 0) {
+      assert(read_options.timestamp);
+      assert(ucmp->timestamp_size() == read_options.timestamp->size());
+    } else {
+      assert(!read_options.timestamp);
+    }
+  }
+#endif  // NDEBUG
 
   SequenceNumber consistent_seqnum;
 
@@ -1767,6 +1787,7 @@ std::vector<Status> DBImpl::MultiGet(
   // merge_operands will contain the sequence of merges in the latter case.
   size_t num_found = 0;
   size_t keys_read;
+  uint64_t curr_value_size = 0;
   for (keys_read = 0; keys_read < num_keys; ++keys_read) {
     merge_context.Clear();
     Status& s = stat_list[keys_read];
@@ -1810,6 +1831,13 @@ std::vector<Status> DBImpl::MultiGet(
     if (s.ok()) {
       bytes_read += value->size();
       num_found++;
+      curr_value_size += value->size();
+      if (curr_value_size > read_options.value_size_soft_limit) {
+        while (++keys_read < num_keys) {
+          stat_list[keys_read] = Status::Aborted();
+        }
+        break;
+      }
     }
 
     if (read_options.deadline.count() &&
@@ -1981,7 +2009,7 @@ void DBImpl::MultiGet(const ReadOptions& read_options, const size_t num_keys,
                       PinnableSlice* values, Status* statuses,
                       const bool sorted_input) {
   return MultiGet(read_options, num_keys, column_families, keys, values,
-                  /*timestamps*/ nullptr, statuses, sorted_input);
+                  /*timestamps=*/nullptr, statuses, sorted_input);
 }
 
 void DBImpl::MultiGet(const ReadOptions& read_options, const size_t num_keys,
@@ -1991,12 +2019,29 @@ void DBImpl::MultiGet(const ReadOptions& read_options, const size_t num_keys,
   if (num_keys == 0) {
     return;
   }
+
+#ifndef NDEBUG
+  for (size_t i = 0; i < num_keys; ++i) {
+    ColumnFamilyHandle* cfh = column_families[i];
+    assert(cfh);
+    const Comparator* const ucmp = cfh->GetComparator();
+    assert(ucmp);
+    if (ucmp->timestamp_size() > 0) {
+      assert(read_options.timestamp);
+      assert(read_options.timestamp->size() == ucmp->timestamp_size());
+    } else {
+      assert(!read_options.timestamp);
+    }
+  }
+#endif  // NDEBUG
+
   autovector<KeyContext, MultiGetContext::MAX_BATCH_SIZE> key_context;
   autovector<KeyContext*, MultiGetContext::MAX_BATCH_SIZE> sorted_keys;
   sorted_keys.resize(num_keys);
   for (size_t i = 0; i < num_keys; ++i) {
     key_context.emplace_back(column_families[i], keys[i], &values[i],
-                             &timestamps[i], &statuses[i]);
+                             timestamps ? &timestamps[i] : nullptr,
+                             &statuses[i]);
   }
   for (size_t i = 0; i < num_keys; ++i) {
     sorted_keys[i] = &key_context[i];
@@ -2047,11 +2092,11 @@ void DBImpl::MultiGet(const ReadOptions& read_options, const size_t num_keys,
     }
   }
   if (!s.ok()) {
-    assert(s.IsTimedOut());
+    assert(s.IsTimedOut() || s.IsAborted());
     for (++cf_iter; cf_iter != multiget_cf_data.end(); ++cf_iter) {
       for (size_t i = cf_iter->start; i < cf_iter->start + cf_iter->num_keys;
            ++i) {
-        *sorted_keys[i]->s = Status::TimedOut();
+        *sorted_keys[i]->s = s;
       }
     }
   }
@@ -2083,7 +2128,8 @@ struct CompareKeyContext {
     }
 
     // Both keys are from the same column family
-    int cmp = comparator->Compare(*(lhs->key), *(rhs->key));
+    int cmp = comparator->CompareWithoutTimestamp(
+        *(lhs->key), /*a_has_ts=*/false, *(rhs->key), /*b_has_ts=*/false);
     if (cmp < 0) {
       return true;
     }
@@ -2115,7 +2161,8 @@ void DBImpl::PrepareMultiGetKeys(
         }
 
         // Both keys are from the same column family
-        int cmp = comparator->Compare(*(lhs->key), *(rhs->key));
+        int cmp = comparator->CompareWithoutTimestamp(
+            *(lhs->key), /*a_has_ts=*/false, *(rhs->key), /*b_has_ts=*/false);
         assert(cmp <= 0);
       }
       index++;
@@ -2204,7 +2251,7 @@ void DBImpl::MultiGetWithCallback(
   Status s = MultiGetImpl(read_options, 0, num_keys, sorted_keys,
                           multiget_cf_data[0].super_version, consistent_seqnum,
                           nullptr, nullptr);
-  assert(s.ok() || s.IsTimedOut());
+  assert(s.ok() || s.IsTimedOut() || s.IsAborted());
   ReturnAndCleanupSuperVersion(multiget_cf_data[0].cfd,
                                multiget_cf_data[0].super_version);
 }
@@ -2232,6 +2279,7 @@ Status DBImpl::MultiGetImpl(
   // merge_operands will contain the sequence of merges in the latter case.
   size_t keys_left = num_keys;
   Status s;
+  uint64_t curr_value_size = 0;
   while (keys_left) {
     if (read_options.deadline.count() &&
         env_->NowMicros() >
@@ -2244,8 +2292,9 @@ Status DBImpl::MultiGetImpl(
                             ? MultiGetContext::MAX_BATCH_SIZE
                             : keys_left;
     MultiGetContext ctx(sorted_keys, start_key + num_keys - keys_left,
-                        batch_size, snapshot);
+                        batch_size, snapshot, read_options);
     MultiGetRange range = ctx.GetMultiGetRange();
+    range.AddValueSize(curr_value_size);
     bool lookup_current = false;
 
     keys_left -= batch_size;
@@ -2276,6 +2325,11 @@ Status DBImpl::MultiGetImpl(
       super_version->current->MultiGet(read_options, &range, callback,
                                        is_blob_index);
     }
+    curr_value_size = range.GetValueSize();
+    if (curr_value_size > read_options.value_size_soft_limit) {
+      s = Status::Aborted();
+      break;
+    }
   }
 
   // Post processing (decrement reference counts and record statistics)
@@ -2290,11 +2344,11 @@ Status DBImpl::MultiGetImpl(
     }
   }
   if (keys_left) {
-    assert(s.IsTimedOut());
+    assert(s.IsTimedOut() || s.IsAborted());
     for (size_t i = start_key + num_keys - keys_left; i < start_key + num_keys;
          ++i) {
       KeyContext* key = (*sorted_keys)[i];
-      *key->s = Status::TimedOut();
+      *key->s = s;
     }
   }
 
@@ -4126,7 +4180,8 @@ Status DBImpl::IngestExternalFiles(
         static_cast<ColumnFamilyHandleImpl*>(args[i].column_family)->cfd();
     SuperVersion* super_version = cfd->GetReferencedSuperVersion(this);
     exec_results[i].second = ingestion_jobs[i].Prepare(
-        args[i].external_files, start_file_number, super_version);
+        args[i].external_files, args[i].files_checksums,
+        args[i].files_checksum_func_names, start_file_number, super_version);
     exec_results[i].first = true;
     CleanupSuperVersion(super_version);
   }
@@ -4137,7 +4192,8 @@ Status DBImpl::IngestExternalFiles(
         static_cast<ColumnFamilyHandleImpl*>(args[0].column_family)->cfd();
     SuperVersion* super_version = cfd->GetReferencedSuperVersion(this);
     exec_results[0].second = ingestion_jobs[0].Prepare(
-        args[0].external_files, next_file_number, super_version);
+        args[0].external_files, args[0].files_checksums,
+        args[0].files_checksum_func_names, next_file_number, super_version);
     exec_results[0].first = true;
     CleanupSuperVersion(super_version);
   }

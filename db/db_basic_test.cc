@@ -9,6 +9,7 @@
 
 #include "db/db_test_util.h"
 #include "port/stack_trace.h"
+#include "rocksdb/merge_operator.h"
 #include "rocksdb/perf_context.h"
 #include "rocksdb/utilities/debug.h"
 #include "table/block_based/block_based_table_reader.h"
@@ -17,6 +18,8 @@
 #if !defined(ROCKSDB_LITE)
 #include "test_util/sync_point.h"
 #endif
+#include "utilities/merge_operators.h"
+#include "utilities/merge_operators/string_append/stringappend.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -1295,14 +1298,18 @@ TEST_F(DBBasicTest, MultiGetBatchedSimpleUnsorted) {
   } while (ChangeCompactOptions());
 }
 
-TEST_F(DBBasicTest, MultiGetBatchedSimpleSorted) {
+TEST_F(DBBasicTest, MultiGetBatchedSortedMultiFile) {
   do {
     CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
     SetPerfLevel(kEnableCount);
+    // To expand the power of this test, generate > 1 table file and
+    // mix with memtable
     ASSERT_OK(Put(1, "k1", "v1"));
     ASSERT_OK(Put(1, "k2", "v2"));
+    Flush(1);
     ASSERT_OK(Put(1, "k3", "v3"));
     ASSERT_OK(Put(1, "k4", "v4"));
+    Flush(1);
     ASSERT_OK(Delete(1, "k4"));
     ASSERT_OK(Put(1, "k5", "v5"));
     ASSERT_OK(Delete(1, "no_key"));
@@ -1333,7 +1340,58 @@ TEST_F(DBBasicTest, MultiGetBatchedSimpleSorted) {
     ASSERT_TRUE(s[5].IsNotFound());
 
     SetPerfLevel(kDisable);
-  } while (ChangeCompactOptions());
+  } while (ChangeOptions());
+}
+
+TEST_F(DBBasicTest, MultiGetBatchedDuplicateKeys) {
+  Options opts = CurrentOptions();
+  opts.merge_operator = MergeOperators::CreateStringAppendOperator();
+  CreateAndReopenWithCF({"pikachu"}, opts);
+  SetPerfLevel(kEnableCount);
+  // To expand the power of this test, generate > 1 table file and
+  // mix with memtable
+  ASSERT_OK(Merge(1, "k1", "v1"));
+  ASSERT_OK(Merge(1, "k2", "v2"));
+  Flush(1);
+  MoveFilesToLevel(2, 1);
+  ASSERT_OK(Merge(1, "k3", "v3"));
+  ASSERT_OK(Merge(1, "k4", "v4"));
+  Flush(1);
+  MoveFilesToLevel(2, 1);
+  ASSERT_OK(Merge(1, "k4", "v4_2"));
+  ASSERT_OK(Merge(1, "k6", "v6"));
+  Flush(1);
+  MoveFilesToLevel(2, 1);
+  ASSERT_OK(Merge(1, "k7", "v7"));
+  ASSERT_OK(Merge(1, "k8", "v8"));
+  Flush(1);
+  MoveFilesToLevel(2, 1);
+
+  get_perf_context()->Reset();
+
+  std::vector<Slice> keys({"k8", "k8", "k8", "k4", "k4", "k1", "k3"});
+  std::vector<PinnableSlice> values(keys.size());
+  std::vector<ColumnFamilyHandle*> cfs(keys.size(), handles_[1]);
+  std::vector<Status> s(keys.size());
+
+  db_->MultiGet(ReadOptions(), handles_[1], keys.size(), keys.data(),
+                values.data(), s.data(), false);
+
+  ASSERT_EQ(values.size(), keys.size());
+  ASSERT_EQ(std::string(values[0].data(), values[0].size()), "v8");
+  ASSERT_EQ(std::string(values[1].data(), values[1].size()), "v8");
+  ASSERT_EQ(std::string(values[2].data(), values[2].size()), "v8");
+  ASSERT_EQ(std::string(values[3].data(), values[3].size()), "v4,v4_2");
+  ASSERT_EQ(std::string(values[4].data(), values[4].size()), "v4,v4_2");
+  ASSERT_EQ(std::string(values[5].data(), values[5].size()), "v1");
+  ASSERT_EQ(std::string(values[6].data(), values[6].size()), "v3");
+  ASSERT_EQ(24, (int)get_perf_context()->multiget_read_bytes);
+
+  for (Status& status : s) {
+    ASSERT_OK(status);
+  }
+
+  SetPerfLevel(kDisable);
 }
 
 TEST_F(DBBasicTest, MultiGetBatchedMultiLevel) {
@@ -1494,6 +1552,221 @@ TEST_F(DBBasicTest, MultiGetBatchedMultiLevelMerge) {
       value.append("val_mem_" + std::to_string(key));
     }
     ASSERT_EQ(values[j], value);
+  }
+}
+
+TEST_F(DBBasicTest, MultiGetBatchedValueSizeInMemory) {
+  CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
+  SetPerfLevel(kEnableCount);
+  ASSERT_OK(Put(1, "k1", "v_1"));
+  ASSERT_OK(Put(1, "k2", "v_2"));
+  ASSERT_OK(Put(1, "k3", "v_3"));
+  ASSERT_OK(Put(1, "k4", "v_4"));
+  ASSERT_OK(Put(1, "k5", "v_5"));
+  ASSERT_OK(Put(1, "k6", "v_6"));
+  std::vector<Slice> keys = {"k1", "k2", "k3", "k4", "k5", "k6"};
+  std::vector<PinnableSlice> values(keys.size());
+  std::vector<Status> s(keys.size());
+  std::vector<ColumnFamilyHandle*> cfs(keys.size(), handles_[1]);
+
+  get_perf_context()->Reset();
+  ReadOptions ro;
+  ro.value_size_soft_limit = 11;
+  db_->MultiGet(ro, handles_[1], keys.size(), keys.data(), values.data(),
+                s.data(), false);
+
+  ASSERT_EQ(values.size(), keys.size());
+  for (unsigned int i = 0; i < 4; i++) {
+    ASSERT_EQ(std::string(values[i].data(), values[i].size()),
+              "v_" + std::to_string(i + 1));
+  }
+
+  for (unsigned int i = 4; i < 6; i++) {
+    ASSERT_TRUE(s[i].IsAborted());
+  }
+
+  ASSERT_EQ(12, (int)get_perf_context()->multiget_read_bytes);
+  SetPerfLevel(kDisable);
+}
+
+TEST_F(DBBasicTest, MultiGetBatchedValueSize) {
+  do {
+    CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
+    SetPerfLevel(kEnableCount);
+
+    ASSERT_OK(Put(1, "k6", "v6"));
+    ASSERT_OK(Put(1, "k7", "v7_"));
+    ASSERT_OK(Put(1, "k3", "v3_"));
+    ASSERT_OK(Put(1, "k4", "v4"));
+    Flush(1);
+    ASSERT_OK(Delete(1, "k4"));
+    ASSERT_OK(Put(1, "k11", "v11"));
+    ASSERT_OK(Delete(1, "no_key"));
+    ASSERT_OK(Put(1, "k8", "v8_"));
+    ASSERT_OK(Put(1, "k13", "v13"));
+    ASSERT_OK(Put(1, "k14", "v14"));
+    ASSERT_OK(Put(1, "k15", "v15"));
+    ASSERT_OK(Put(1, "k16", "v16"));
+    ASSERT_OK(Put(1, "k17", "v17"));
+    Flush(1);
+
+    ASSERT_OK(Put(1, "k1", "v1_"));
+    ASSERT_OK(Put(1, "k2", "v2_"));
+    ASSERT_OK(Put(1, "k5", "v5_"));
+    ASSERT_OK(Put(1, "k9", "v9_"));
+    ASSERT_OK(Put(1, "k10", "v10"));
+    ASSERT_OK(Delete(1, "k2"));
+    ASSERT_OK(Delete(1, "k6"));
+
+    get_perf_context()->Reset();
+
+    std::vector<Slice> keys({"k1", "k10", "k11", "k12", "k13", "k14", "k15",
+                             "k16", "k17", "k2", "k3", "k4", "k5", "k6", "k7",
+                             "k8", "k9", "no_key"});
+    std::vector<PinnableSlice> values(keys.size());
+    std::vector<ColumnFamilyHandle*> cfs(keys.size(), handles_[1]);
+    std::vector<Status> s(keys.size());
+
+    ReadOptions ro;
+    ro.value_size_soft_limit = 20;
+    db_->MultiGet(ro, handles_[1], keys.size(), keys.data(), values.data(),
+                  s.data(), false);
+
+    ASSERT_EQ(values.size(), keys.size());
+
+    // In memory keys
+    ASSERT_EQ(std::string(values[0].data(), values[0].size()), "v1_");
+    ASSERT_EQ(std::string(values[1].data(), values[1].size()), "v10");
+    ASSERT_TRUE(s[9].IsNotFound());  // k2
+    ASSERT_EQ(std::string(values[12].data(), values[12].size()), "v5_");
+    ASSERT_TRUE(s[13].IsNotFound());  // k6
+    ASSERT_EQ(std::string(values[16].data(), values[16].size()), "v9_");
+
+    // In sst files
+    ASSERT_EQ(std::string(values[2].data(), values[1].size()), "v11");
+    ASSERT_EQ(std::string(values[4].data(), values[4].size()), "v13");
+    ASSERT_EQ(std::string(values[5].data(), values[5].size()), "v14");
+
+    // Remaining aborted after value_size exceeds.
+    ASSERT_TRUE(s[3].IsAborted());
+    ASSERT_TRUE(s[6].IsAborted());
+    ASSERT_TRUE(s[7].IsAborted());
+    ASSERT_TRUE(s[8].IsAborted());
+    ASSERT_TRUE(s[10].IsAborted());
+    ASSERT_TRUE(s[11].IsAborted());
+    ASSERT_TRUE(s[14].IsAborted());
+    ASSERT_TRUE(s[15].IsAborted());
+    ASSERT_TRUE(s[17].IsAborted());
+
+    // 6 kv pairs * 3 bytes per value (i.e. 18)
+    ASSERT_EQ(21, (int)get_perf_context()->multiget_read_bytes);
+    SetPerfLevel(kDisable);
+  } while (ChangeCompactOptions());
+}
+
+TEST_F(DBBasicTest, MultiGetBatchedValueSizeMultiLevelMerge) {
+  Options options = CurrentOptions();
+  options.disable_auto_compactions = true;
+  options.merge_operator = MergeOperators::CreateStringAppendOperator();
+  BlockBasedTableOptions bbto;
+  bbto.filter_policy.reset(NewBloomFilterPolicy(10, false));
+  options.table_factory.reset(NewBlockBasedTableFactory(bbto));
+  Reopen(options);
+  int num_keys = 0;
+
+  for (int i = 0; i < 64; ++i) {
+    ASSERT_OK(Put("key_" + std::to_string(i), "val_l2_" + std::to_string(i)));
+    num_keys++;
+    if (num_keys == 8) {
+      Flush();
+      num_keys = 0;
+    }
+  }
+  if (num_keys > 0) {
+    Flush();
+    num_keys = 0;
+  }
+  MoveFilesToLevel(2);
+
+  for (int i = 0; i < 64; i += 3) {
+    ASSERT_OK(Merge("key_" + std::to_string(i), "val_l1_" + std::to_string(i)));
+    num_keys++;
+    if (num_keys == 8) {
+      Flush();
+      num_keys = 0;
+    }
+  }
+  if (num_keys > 0) {
+    Flush();
+    num_keys = 0;
+  }
+  MoveFilesToLevel(1);
+
+  for (int i = 0; i < 64; i += 5) {
+    ASSERT_OK(Merge("key_" + std::to_string(i), "val_l0_" + std::to_string(i)));
+    num_keys++;
+    if (num_keys == 8) {
+      Flush();
+      num_keys = 0;
+    }
+  }
+  if (num_keys > 0) {
+    Flush();
+    num_keys = 0;
+  }
+  ASSERT_EQ(0, num_keys);
+
+  for (int i = 0; i < 64; i += 9) {
+    ASSERT_OK(
+        Merge("key_" + std::to_string(i), "val_mem_" + std::to_string(i)));
+  }
+
+  std::vector<std::string> keys_str;
+  for (int i = 10; i < 50; ++i) {
+    keys_str.push_back("key_" + std::to_string(i));
+  }
+
+  std::vector<Slice> keys(keys_str.size());
+  for (int i = 0; i < 40; i++) {
+    keys[i] = Slice(keys_str[i]);
+  }
+
+  std::vector<PinnableSlice> values(keys_str.size());
+  std::vector<Status> statuses(keys_str.size());
+  ReadOptions read_options;
+  read_options.verify_checksums = true;
+  read_options.value_size_soft_limit = 380;
+  db_->MultiGet(read_options, dbfull()->DefaultColumnFamily(), keys.size(),
+                keys.data(), values.data(), statuses.data());
+
+  ASSERT_EQ(values.size(), keys.size());
+
+  uint64_t curr_value_size = 0;
+  for (unsigned int j = 0; j < 26; ++j) {
+    int key = j + 10;
+    std::string value;
+    value.append("val_l2_" + std::to_string(key));
+    if (key % 3 == 0) {
+      value.append(",");
+      value.append("val_l1_" + std::to_string(key));
+    }
+    if (key % 5 == 0) {
+      value.append(",");
+      value.append("val_l0_" + std::to_string(key));
+    }
+    if (key % 9 == 0) {
+      value.append(",");
+      value.append("val_mem_" + std::to_string(key));
+    }
+    curr_value_size += value.size();
+    ASSERT_EQ(values[j], value);
+    ASSERT_OK(statuses[j]);
+  }
+  // ASSERT_TRUE(curr_value_size <= read_options.value_size_hard_limit);
+
+  // All remaning keys status is set Status::Abort
+  for (unsigned int j = 26; j < 40; j++) {
+    ASSERT_TRUE(statuses[j].IsAborted());
   }
 }
 
@@ -1681,13 +1954,13 @@ TEST_F(DBBasicTest, GetAllKeyVersions) {
   ASSERT_EQ(kNumInserts + kNumDeletes + kNumUpdates, key_versions.size());
 
   // Check non-default column family
-  for (size_t i = 0; i != kNumInserts - 1; ++i) {
+  for (size_t i = 0; i + 1 != kNumInserts; ++i) {
     ASSERT_OK(Put(1, std::to_string(i), "value"));
   }
-  for (size_t i = 0; i != kNumUpdates - 1; ++i) {
+  for (size_t i = 0; i + 1 != kNumUpdates; ++i) {
     ASSERT_OK(Put(1, std::to_string(i), "value1"));
   }
-  for (size_t i = 0; i != kNumDeletes - 1; ++i) {
+  for (size_t i = 0; i + 1 != kNumDeletes; ++i) {
     ASSERT_OK(Delete(1, std::to_string(i)));
   }
   ASSERT_OK(ROCKSDB_NAMESPACE::GetAllKeyVersions(
@@ -1774,6 +2047,28 @@ TEST_F(DBBasicTest, IncrementalRecoveryNoCorrupt) {
   }
 }
 
+TEST_F(DBBasicTest, BestEffortsRecoveryWithVersionBuildingFailure) {
+  Options options = CurrentOptions();
+  DestroyAndReopen(options);
+  ASSERT_OK(Put("foo", "value"));
+  ASSERT_OK(Flush());
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionBuilder::CheckConsistencyBeforeReturn", [&](void* arg) {
+        ASSERT_NE(nullptr, arg);
+        *(reinterpret_cast<Status*>(arg)) =
+            Status::Corruption("Inject corruption");
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  options.best_efforts_recovery = true;
+  Status s = TryReopen(options);
+  ASSERT_TRUE(s.IsCorruption());
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+}
+
 #ifndef ROCKSDB_LITE
 namespace {
 class TableFileListener : public EventListener {
@@ -1814,11 +2109,16 @@ TEST_F(DBBasicTest, RecoverWithMissingFiles) {
     ASSERT_OK(Flush(static_cast<int>(cf)));
   }
 
-  // Delete files
+  // Delete and corrupt files
   for (size_t i = 0; i < all_cf_names.size(); ++i) {
     std::vector<std::string>& files = listener->GetFiles(all_cf_names[i]);
     ASSERT_EQ(3, files.size());
-    for (int j = static_cast<int>(files.size() - 1); j >= static_cast<int>(i);
+    std::string corrupted_data;
+    ASSERT_OK(ReadFileToString(env_, files[files.size() - 1], &corrupted_data));
+    ASSERT_OK(WriteStringToFile(
+        env_, corrupted_data.substr(0, corrupted_data.size() - 2),
+        files[files.size() - 1], /*should_sync=*/true));
+    for (int j = static_cast<int>(files.size() - 2); j >= static_cast<int>(i);
          --j) {
       ASSERT_OK(env_->DeleteFile(files[j]));
     }
@@ -1848,6 +2148,32 @@ TEST_F(DBBasicTest, RecoverWithMissingFiles) {
     iter->Next();
     ASSERT_FALSE(iter->Valid());
   }
+}
+
+TEST_F(DBBasicTest, BestEffortsRecoveryTryMultipleManifests) {
+  Options options = CurrentOptions();
+  options.env = env_;
+  DestroyAndReopen(options);
+  ASSERT_OK(Put("foo", "value0"));
+  ASSERT_OK(Flush());
+  Close();
+  {
+    // Hack by adding a new MANIFEST with high file number
+    std::string garbage(10, '\0');
+    ASSERT_OK(WriteStringToFile(env_, garbage, dbname_ + "/MANIFEST-001000",
+                                /*should_sync=*/true));
+  }
+  {
+    // Hack by adding a corrupted SST not referenced by any MANIFEST
+    std::string garbage(10, '\0');
+    ASSERT_OK(WriteStringToFile(env_, garbage, dbname_ + "/001001.sst",
+                                /*should_sync=*/true));
+  }
+
+  options.best_efforts_recovery = true;
+
+  Reopen(options);
+  ASSERT_OK(Put("bar", "value"));
 }
 
 TEST_F(DBBasicTest, RecoverWithNoCurrentFile) {
@@ -1916,11 +2242,11 @@ TEST_F(DBBasicTest, SkipWALIfMissingTableFiles) {
 class DBBasicTestMultiGet : public DBTestBase {
  public:
   DBBasicTestMultiGet(std::string test_dir, int num_cfs, bool compressed_cache,
-                      bool uncompressed_cache, bool compression_enabled,
-                      bool fill_cache, uint32_t compression_parallel_threads)
+                      bool uncompressed_cache, bool _compression_enabled,
+                      bool _fill_cache, uint32_t compression_parallel_threads)
       : DBTestBase(test_dir) {
-    compression_enabled_ = compression_enabled;
-    fill_cache_ = fill_cache;
+    compression_enabled_ = _compression_enabled;
+    fill_cache_ = _fill_cache;
 
     if (compressed_cache) {
       std::shared_ptr<Cache> cache = NewLRUCache(1048576);
@@ -2092,23 +2418,25 @@ class DBBasicTestMultiGet : public DBTestBase {
     const BlockBuilder& data_block_builder_;
   };
 
-  class MyBlockCache : public Cache {
+  class MyBlockCache : public CacheWrapper {
    public:
-    explicit MyBlockCache(std::shared_ptr<Cache>& target)
-        : target_(target), num_lookups_(0), num_found_(0), num_inserts_(0) {}
+    explicit MyBlockCache(std::shared_ptr<Cache> target)
+        : CacheWrapper(target),
+          num_lookups_(0),
+          num_found_(0),
+          num_inserts_(0) {}
 
-    virtual const char* Name() const override { return "MyBlockCache"; }
+    const char* Name() const override { return "MyBlockCache"; }
 
-    virtual Status Insert(const Slice& key, void* value, size_t charge,
-                          void (*deleter)(const Slice& key, void* value),
-                          Handle** handle = nullptr,
-                          Priority priority = Priority::LOW) override {
+    Status Insert(const Slice& key, void* value, size_t charge,
+                  void (*deleter)(const Slice& key, void* value),
+                  Handle** handle = nullptr,
+                  Priority priority = Priority::LOW) override {
       num_inserts_++;
       return target_->Insert(key, value, charge, deleter, handle, priority);
     }
 
-    virtual Handle* Lookup(const Slice& key,
-                           Statistics* stats = nullptr) override {
+    Handle* Lookup(const Slice& key, Statistics* stats = nullptr) override {
       num_lookups_++;
       Handle* handle = target_->Lookup(key, stats);
       if (handle != nullptr) {
@@ -2116,57 +2444,6 @@ class DBBasicTestMultiGet : public DBTestBase {
       }
       return handle;
     }
-
-    virtual bool Ref(Handle* handle) override { return target_->Ref(handle); }
-
-    virtual bool Release(Handle* handle, bool force_erase = false) override {
-      return target_->Release(handle, force_erase);
-    }
-
-    virtual void* Value(Handle* handle) override {
-      return target_->Value(handle);
-    }
-
-    virtual void Erase(const Slice& key) override { target_->Erase(key); }
-    virtual uint64_t NewId() override { return target_->NewId(); }
-
-    virtual void SetCapacity(size_t capacity) override {
-      target_->SetCapacity(capacity);
-    }
-
-    virtual void SetStrictCapacityLimit(bool strict_capacity_limit) override {
-      target_->SetStrictCapacityLimit(strict_capacity_limit);
-    }
-
-    virtual bool HasStrictCapacityLimit() const override {
-      return target_->HasStrictCapacityLimit();
-    }
-
-    virtual size_t GetCapacity() const override {
-      return target_->GetCapacity();
-    }
-
-    virtual size_t GetUsage() const override { return target_->GetUsage(); }
-
-    virtual size_t GetUsage(Handle* handle) const override {
-      return target_->GetUsage(handle);
-    }
-
-    virtual size_t GetPinnedUsage() const override {
-      return target_->GetPinnedUsage();
-    }
-
-    virtual size_t GetCharge(Handle* /*handle*/) const override { return 0; }
-
-    virtual void ApplyToAllCacheEntries(void (*callback)(void*, size_t),
-                                        bool thread_safe) override {
-      return target_->ApplyToAllCacheEntries(callback, thread_safe);
-    }
-
-    virtual void EraseUnRefEntries() override {
-      return target_->EraseUnRefEntries();
-    }
-
     int num_lookups() { return num_lookups_; }
 
     int num_found() { return num_found_; }
@@ -2174,7 +2451,6 @@ class DBBasicTestMultiGet : public DBTestBase {
     int num_inserts() { return num_inserts_; }
 
    private:
-    std::shared_ptr<Cache> target_;
     int num_lookups_;
     int num_found_;
     int num_inserts_;
@@ -2437,17 +2713,22 @@ class DBBasicTestMultiGetDeadline : public DBBasicTestMultiGet {
 
   class DeadlineRandomAccessFile : public FSRandomAccessFileWrapper {
    public:
-    DeadlineRandomAccessFile(DeadlineFS& fs,
+    DeadlineRandomAccessFile(DeadlineFS& fs, SpecialEnv* env,
                              std::unique_ptr<FSRandomAccessFile>& file)
         : FSRandomAccessFileWrapper(file.get()),
           fs_(fs),
-          file_(std::move(file)) {}
+          file_(std::move(file)),
+          env_(env) {}
 
     IOStatus Read(uint64_t offset, size_t len, const IOOptions& opts,
           Slice* result, char* scratch, IODebugContext* dbg) const override {
       int delay;
+      const std::chrono::microseconds deadline = fs_.GetDeadline();
+      if (deadline.count()) {
+        AssertDeadline(deadline, opts);
+      }
       if (fs_.ShouldDelay(&delay)) {
-        Env::Default()->SleepForMicroseconds(delay);
+        env_->SleepForMicroseconds(delay);
       }
       return FSRandomAccessFileWrapper::Read(offset, len, opts, result, scratch,
                                              dbg);
@@ -2456,20 +2737,37 @@ class DBBasicTestMultiGetDeadline : public DBBasicTestMultiGet {
     IOStatus MultiRead(FSReadRequest* reqs, size_t num_reqs,
           const IOOptions& options, IODebugContext* dbg) override {
       int delay;
+      const std::chrono::microseconds deadline = fs_.GetDeadline();
+      if (deadline.count()) {
+        AssertDeadline(deadline, options);
+      }
       if (fs_.ShouldDelay(&delay)) {
-        Env::Default()->SleepForMicroseconds(delay);
+        env_->SleepForMicroseconds(delay);
       }
       return FSRandomAccessFileWrapper::MultiRead(reqs, num_reqs, options, dbg);
     }
 
    private:
+    void AssertDeadline(const std::chrono::microseconds deadline,
+                        const IOOptions& opts) const {
+      // Give a leeway of +- 10us as it can take some time for the Get/
+      // MultiGet call to reach here, in order to avoid false alarms
+      std::chrono::microseconds now =
+          std::chrono::microseconds(env_->NowMicros());
+      ASSERT_EQ(deadline - now, opts.timeout);
+    }
     DeadlineFS& fs_;
     std::unique_ptr<FSRandomAccessFile> file_;
+    SpecialEnv* env_;
   };
 
   class DeadlineFS : public FileSystemWrapper {
    public:
-    DeadlineFS() : FileSystemWrapper(FileSystem::Default()) {}
+    DeadlineFS(SpecialEnv* env)
+        : FileSystemWrapper(FileSystem::Default()),
+          delay_idx_(0),
+          deadline_(std::chrono::microseconds::zero()),
+          env_(env) {}
     ~DeadlineFS() = default;
 
     IOStatus NewRandomAccessFile(const std::string& fname,
@@ -2480,13 +2778,14 @@ class DBBasicTestMultiGetDeadline : public DBBasicTestMultiGet {
       IOStatus s;
 
       s = target()->NewRandomAccessFile(fname, opts, &file, dbg);
-      result->reset(new DeadlineRandomAccessFile(*this, file));
+      result->reset(new DeadlineRandomAccessFile(*this, env_, file));
       return s;
     }
 
     // Set a vector of {IO counter, delay in microseconds} pairs that control
     // when to inject a delay and duration of the delay
-    void SetDelaySequence(const std::vector<std::pair<int, int>>&& seq) {
+    void SetDelaySequence(const std::chrono::microseconds deadline,
+                          const std::vector<std::pair<int, int>>&& seq) {
       int total_delay = 0;
       for (auto& seq_iter : seq) {
         // Ensure no individual delay is > 500ms
@@ -2499,6 +2798,7 @@ class DBBasicTestMultiGetDeadline : public DBBasicTestMultiGet {
       delay_seq_ = seq;
       delay_idx_ = 0;
       io_count_ = 0;
+      deadline_ = deadline;
     }
 
     // Increment the IO counter and return a delay in microseconds
@@ -2512,10 +2812,14 @@ class DBBasicTestMultiGetDeadline : public DBBasicTestMultiGet {
       return false;
     }
 
+    const std::chrono::microseconds GetDeadline() { return deadline_; }
+
    private:
     std::vector<std::pair<int, int>> delay_seq_;
     size_t delay_idx_;
     int io_count_;
+    std::chrono::microseconds deadline_;
+    SpecialEnv* env_;
   };
 
   inline void CheckStatus(std::vector<Status>& statuses, size_t num_ok) {
@@ -2531,9 +2835,10 @@ class DBBasicTestMultiGetDeadline : public DBBasicTestMultiGet {
 
 TEST_F(DBBasicTestMultiGetDeadline, MultiGetDeadlineExceeded) {
   std::shared_ptr<DBBasicTestMultiGetDeadline::DeadlineFS> fs(
-      new DBBasicTestMultiGetDeadline::DeadlineFS());
-  std::unique_ptr<Env> env = NewCompositeEnv(fs);
+      new DBBasicTestMultiGetDeadline::DeadlineFS(env_));
+  std::unique_ptr<Env> env(new CompositeEnvWrapper(env_, fs));
   Options options = CurrentOptions();
+  env_->SetTimeElapseOnlySleep(&options);
 
   std::shared_ptr<Cache> cache = NewLRUCache(1048576);
   BlockBasedTableOptions table_options;
@@ -2557,13 +2862,13 @@ TEST_F(DBBasicTestMultiGetDeadline, MultiGetDeadlineExceeded) {
     cfs[i] = handles_[i];
     keys[i] = Slice(key_str[i].data(), key_str[i].size());
   }
-  // Delay the first IO by 200ms
-  fs->SetDelaySequence({{0, 200000}});
 
   ReadOptions ro;
   ro.deadline = std::chrono::microseconds{env->NowMicros() + 10000};
+  // Delay the first IO by 200ms
+  fs->SetDelaySequence(ro.deadline, {{0, 20000}});
+
   std::vector<Status> statuses = dbfull()->MultiGet(ro, cfs, keys, &values);
-  std::cout << "Non-batched MultiGet";
   // The first key is successful because we check after the lookup, but
   // subsequent keys fail due to deadline exceeded
   CheckStatus(statuses, 1);
@@ -2585,10 +2890,9 @@ TEST_F(DBBasicTestMultiGetDeadline, MultiGetDeadlineExceeded) {
     cfs[i] = handles_[i / 2];
     keys[i] = Slice(key_str[i].data(), key_str[i].size());
   }
-  fs->SetDelaySequence({{1, 200000}});
   ro.deadline = std::chrono::microseconds{env->NowMicros() + 10000};
+  fs->SetDelaySequence(ro.deadline, {{1, 20000}});
   statuses = dbfull()->MultiGet(ro, cfs, keys, &values);
-  std::cout << "Non-batched 2";
   CheckStatus(statuses, 3);
 
   // Test batched MultiGet with an IO delay in the first data block read.
@@ -2600,11 +2904,10 @@ TEST_F(DBBasicTestMultiGetDeadline, MultiGetDeadlineExceeded) {
   cache->SetCapacity(1048576);
   statuses.clear();
   statuses.resize(keys.size());
-  fs->SetDelaySequence({{0, 200000}});
   ro.deadline = std::chrono::microseconds{env->NowMicros() + 10000};
+  fs->SetDelaySequence(ro.deadline, {{0, 20000}});
   dbfull()->MultiGet(ro, keys.size(), cfs.data(), keys.data(),
                      pin_values.data(), statuses.data());
-  std::cout << "Batched 1";
   CheckStatus(statuses, 2);
 
   // Similar to the previous one, but an IO delay in the third CF data block
@@ -2616,11 +2919,10 @@ TEST_F(DBBasicTestMultiGetDeadline, MultiGetDeadlineExceeded) {
   cache->SetCapacity(1048576);
   statuses.clear();
   statuses.resize(keys.size());
-  fs->SetDelaySequence({{2, 200000}});
   ro.deadline = std::chrono::microseconds{env->NowMicros() + 10000};
+  fs->SetDelaySequence(ro.deadline, {{2, 20000}});
   dbfull()->MultiGet(ro, keys.size(), cfs.data(), keys.data(),
                      pin_values.data(), statuses.data());
-  std::cout << "Batched 2";
   CheckStatus(statuses, 6);
 
   // Similar to the previous one, but an IO delay in the last but one CF
@@ -2631,11 +2933,10 @@ TEST_F(DBBasicTestMultiGetDeadline, MultiGetDeadlineExceeded) {
   cache->SetCapacity(1048576);
   statuses.clear();
   statuses.resize(keys.size());
-  fs->SetDelaySequence({{3, 200000}});
   ro.deadline = std::chrono::microseconds{env->NowMicros() + 10000};
+  fs->SetDelaySequence(ro.deadline, {{3, 20000}});
   dbfull()->MultiGet(ro, keys.size(), cfs.data(), keys.data(),
                      pin_values.data(), statuses.data());
-  std::cout << "Batched 3";
   CheckStatus(statuses, 8);
 
   // Test batched MultiGet with single CF and lots of keys. Inject delay
@@ -2658,11 +2959,10 @@ TEST_F(DBBasicTestMultiGetDeadline, MultiGetDeadlineExceeded) {
   }
   statuses.clear();
   statuses.resize(keys.size());
-  fs->SetDelaySequence({{1, 200000}});
   ro.deadline = std::chrono::microseconds{env->NowMicros() + 10000};
+  fs->SetDelaySequence(ro.deadline, {{1, 20000}});
   dbfull()->MultiGet(ro, handles_[0], keys.size(), keys.data(),
                      pin_values.data(), statuses.data());
-  std::cout << "Batched single CF";
   CheckStatus(statuses, 64);
   Close();
 }

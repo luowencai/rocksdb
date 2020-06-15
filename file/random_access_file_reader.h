@@ -62,13 +62,13 @@ class RandomAccessFileReader {
  public:
   explicit RandomAccessFileReader(
       std::unique_ptr<FSRandomAccessFile>&& raf, const std::string& _file_name,
-      Env* env = nullptr, Statistics* stats = nullptr, uint32_t hist_type = 0,
+      Env* _env = nullptr, Statistics* stats = nullptr, uint32_t hist_type = 0,
       HistogramImpl* file_read_hist = nullptr,
       RateLimiter* rate_limiter = nullptr,
       const std::vector<std::shared_ptr<EventListener>>& listeners = {})
       : file_(std::move(raf)),
         file_name_(std::move(_file_name)),
-        env_(env),
+        env_(_env),
         stats_(stats),
         hist_type_(hist_type),
         file_read_hist_(file_read_hist),
@@ -114,15 +114,16 @@ class RandomAccessFileReader {
   // 2. Otherwise, scratch is not used and can be null, the aligned_buf owns
   // the internally allocated buffer on return, and the result refers to a
   // region in aligned_buf.
-  Status Read(uint64_t offset, size_t n, Slice* result, char* scratch,
-              AlignedBuf* aligned_buf, bool for_compaction = false) const;
+  Status Read(const IOOptions& opts, uint64_t offset, size_t n, Slice* result,
+              char* scratch, AlignedBuf* aligned_buf,
+              bool for_compaction = false) const;
 
   // REQUIRES:
   // num_reqs > 0, reqs do not overlap, and offsets in reqs are increasing.
   // In non-direct IO mode, aligned_buf should be null;
   // In direct IO mode, aligned_buf stores the aligned buffer allocated inside
   // MultiRead, the result Slices in reqs refer to aligned_buf.
-  Status MultiRead(FSReadRequest* reqs, size_t num_reqs,
+  Status MultiRead(const IOOptions& opts, FSReadRequest* reqs, size_t num_reqs,
                    AlignedBuf* aligned_buf) const;
 
   Status Prefetch(uint64_t offset, size_t n) const {
@@ -134,5 +135,7 @@ class RandomAccessFileReader {
   std::string file_name() const { return file_name_; }
 
   bool use_direct_io() const { return file_->use_direct_io(); }
+
+  Env* env() const { return env_; }
 };
 }  // namespace ROCKSDB_NAMESPACE

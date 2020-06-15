@@ -16,7 +16,6 @@
 #include "cache/sharded_cache.h"
 #include "options/options_helper.h"
 #include "options/options_parser.h"
-#include "options/options_sanity_check.h"
 #include "port/port.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/convenience.h"
@@ -63,8 +62,8 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
        "kZSTD:"
        "kZSTDNotFinalCompression"},
       {"bottommost_compression", "kLZ4Compression"},
-      {"bottommost_compression_opts", "5:6:7:8:9:10:true"},
-      {"compression_opts", "4:5:6:7:8:9:true"},
+      {"bottommost_compression_opts", "5:6:7:8:10:true"},
+      {"compression_opts", "4:5:6:7:8:true"},
       {"num_levels", "8"},
       {"level0_file_num_compaction_trigger", "8"},
       {"level0_slowdown_writes_trigger", "9"},
@@ -176,15 +175,17 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.compression_opts.strategy, 6);
   ASSERT_EQ(new_cf_opt.compression_opts.max_dict_bytes, 7u);
   ASSERT_EQ(new_cf_opt.compression_opts.zstd_max_train_bytes, 8u);
-  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads, 9u);
+  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads,
+            CompressionOptions().parallel_threads);
   ASSERT_EQ(new_cf_opt.compression_opts.enabled, true);
   ASSERT_EQ(new_cf_opt.bottommost_compression, kLZ4Compression);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.window_bits, 5);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.level, 6);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.strategy, 7);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.max_dict_bytes, 8u);
-  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.zstd_max_train_bytes, 9u);
-  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads, 10u);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.zstd_max_train_bytes, 10u);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads,
+            CompressionOptions().parallel_threads);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.enabled, true);
   ASSERT_EQ(new_cf_opt.num_levels, 8);
   ASSERT_EQ(new_cf_opt.level0_file_num_compaction_trigger, 8);
@@ -1298,8 +1299,8 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
        "kZSTD:"
        "kZSTDNotFinalCompression"},
       {"bottommost_compression", "kLZ4Compression"},
-      {"bottommost_compression_opts", "5:6:7:8:9:10:true"},
-      {"compression_opts", "4:5:6:7:8:9:true"},
+      {"bottommost_compression_opts", "5:6:7:8:9:true"},
+      {"compression_opts", "4:5:6:7:8:true"},
       {"num_levels", "8"},
       {"level0_file_num_compaction_trigger", "8"},
       {"level0_slowdown_writes_trigger", "9"},
@@ -1403,7 +1404,8 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.compression_opts.strategy, 6);
   ASSERT_EQ(new_cf_opt.compression_opts.max_dict_bytes, 7u);
   ASSERT_EQ(new_cf_opt.compression_opts.zstd_max_train_bytes, 8u);
-  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads, 9u);
+  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads,
+            CompressionOptions().parallel_threads);
   ASSERT_EQ(new_cf_opt.compression_opts.enabled, true);
   ASSERT_EQ(new_cf_opt.bottommost_compression, kLZ4Compression);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.window_bits, 5);
@@ -1411,7 +1413,8 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.strategy, 7);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.max_dict_bytes, 8u);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.zstd_max_train_bytes, 9u);
-  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads, 10u);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads,
+            CompressionOptions().parallel_threads);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.enabled, true);
   ASSERT_EQ(new_cf_opt.num_levels, 8);
   ASSERT_EQ(new_cf_opt.level0_file_num_compaction_trigger, 8);
@@ -2098,7 +2101,7 @@ TEST_F(OptionsParserTest, Comment) {
       "  # if a section is blank, we will use the default\n";
 
   const std::string kTestFileName = "test-rocksdb-options.ini";
-  env_->WriteToNewFile(kTestFileName, options_file_content);
+  ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
   RocksDBOptionsParser parser;
   ASSERT_OK(
       parser.Parse(kTestFileName, fs_.get(), false, 4096 /* readahead_size */));
@@ -2129,7 +2132,7 @@ TEST_F(OptionsParserTest, ExtraSpace) {
       "  # if a section is blank, we will use the default\n";
 
   const std::string kTestFileName = "test-rocksdb-options.ini";
-  env_->WriteToNewFile(kTestFileName, options_file_content);
+  ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
   RocksDBOptionsParser parser;
   ASSERT_OK(
       parser.Parse(kTestFileName, fs_.get(), false, 4096 /* readahead_size */));
@@ -2147,7 +2150,7 @@ TEST_F(OptionsParserTest, MissingDBOptions) {
       "  # if a section is blank, we will use the default\n";
 
   const std::string kTestFileName = "test-rocksdb-options.ini";
-  env_->WriteToNewFile(kTestFileName, options_file_content);
+  ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
   RocksDBOptionsParser parser;
   ASSERT_NOK(
       parser.Parse(kTestFileName, fs_.get(), false, 4096 /* readahead_size */));
@@ -2177,7 +2180,7 @@ TEST_F(OptionsParserTest, DoubleDBOptions) {
       "  # if a section is blank, we will use the default\n";
 
   const std::string kTestFileName = "test-rocksdb-options.ini";
-  env_->WriteToNewFile(kTestFileName, options_file_content);
+  ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
   RocksDBOptionsParser parser;
   ASSERT_NOK(
       parser.Parse(kTestFileName, fs_.get(), false, 4096 /* readahead_size */));
@@ -2205,7 +2208,7 @@ TEST_F(OptionsParserTest, NoDefaultCFOptions) {
       "  # if a section is blank, we will use the default\n";
 
   const std::string kTestFileName = "test-rocksdb-options.ini";
-  env_->WriteToNewFile(kTestFileName, options_file_content);
+  ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
   RocksDBOptionsParser parser;
   ASSERT_NOK(
       parser.Parse(kTestFileName, fs_.get(), false, 4096 /* readahead_size */));
@@ -2235,7 +2238,7 @@ TEST_F(OptionsParserTest, DefaultCFOptionsMustBeTheFirst) {
       "  # if a section is blank, we will use the default\n";
 
   const std::string kTestFileName = "test-rocksdb-options.ini";
-  env_->WriteToNewFile(kTestFileName, options_file_content);
+  ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
   RocksDBOptionsParser parser;
   ASSERT_NOK(
       parser.Parse(kTestFileName, fs_.get(), false, 4096 /* readahead_size */));
@@ -2264,7 +2267,7 @@ TEST_F(OptionsParserTest, DuplicateCFOptions) {
       "[CFOptions \"something_else\"]\n";
 
   const std::string kTestFileName = "test-rocksdb-options.ini";
-  env_->WriteToNewFile(kTestFileName, options_file_content);
+  ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
   RocksDBOptionsParser parser;
   ASSERT_NOK(
       parser.Parse(kTestFileName, fs_.get(), false, 4096 /* readahead_size */));
@@ -2332,8 +2335,12 @@ TEST_F(OptionsParserTest, IgnoreUnknownOptions) {
         "  # if a section is blank, we will use the default\n";
 
     const std::string kTestFileName = "test-rocksdb-options.ini";
-    env_->DeleteFile(kTestFileName);
-    env_->WriteToNewFile(kTestFileName, options_file_content);
+    auto s = env_->FileExists(kTestFileName);
+    ASSERT_TRUE(s.ok() || s.IsNotFound());
+    if (s.ok()) {
+      ASSERT_OK(env_->DeleteFile(kTestFileName));
+    }
+    ASSERT_OK(env_->WriteToNewFile(kTestFileName, options_file_content));
     RocksDBOptionsParser parser;
     ASSERT_NOK(parser.Parse(kTestFileName, fs_.get(), false,
                             4096 /* readahead_size */));
@@ -2381,7 +2388,7 @@ TEST_F(OptionsParserTest, ParseVersion) {
     snprintf(buffer, kLength - 1, file_template.c_str(), iv.c_str());
 
     parser.Reset();
-    env_->WriteToNewFile(iv, buffer);
+    ASSERT_OK(env_->WriteToNewFile(iv, buffer));
     ASSERT_NOK(parser.Parse(iv, fs_.get(), false, 0 /* readahead_size */));
   }
 
@@ -2390,7 +2397,7 @@ TEST_F(OptionsParserTest, ParseVersion) {
   for (auto vv : valid_versions) {
     snprintf(buffer, kLength - 1, file_template.c_str(), vv.c_str());
     parser.Reset();
-    env_->WriteToNewFile(vv, buffer);
+    ASSERT_OK(env_->WriteToNewFile(vv, buffer));
     ASSERT_OK(parser.Parse(vv, fs_.get(), false, 0 /* readahead_size */));
   }
 }
@@ -2985,6 +2992,496 @@ TEST_F(OptionsParserTest, EscapeOptionString) {
   ASSERT_EQ(RocksDBOptionsParser::TrimAndRemoveComment(
                 "Escape \\# and # comment together   ."),
             "Escape \\# and");
+}
+
+static void TestAndCompareOption(const ConfigOptions& config_options,
+                                 const OptionTypeInfo& opt_info,
+                                 const std::string& opt_name, void* base_ptr,
+                                 void* comp_ptr) {
+  std::string result, mismatch;
+  char* base_addr = reinterpret_cast<char*>(base_ptr) + opt_info.offset_;
+  char* comp_addr = reinterpret_cast<char*>(comp_ptr) + opt_info.offset_;
+  ASSERT_OK(opt_info.Serialize(config_options, opt_name, base_addr, &result));
+  ASSERT_OK(opt_info.Parse(config_options, opt_name, result, comp_addr));
+  ASSERT_TRUE(opt_info.AreEqual(config_options, opt_name, base_addr, comp_addr,
+                                &mismatch));
+}
+
+static void TestAndCompareOption(const ConfigOptions& config_options,
+                                 const OptionTypeInfo& opt_info,
+                                 const std::string& opt_name,
+                                 const std::string& opt_value, void* base_ptr,
+                                 void* comp_ptr) {
+  char* base_addr = reinterpret_cast<char*>(base_ptr) + opt_info.offset_;
+  ASSERT_OK(opt_info.Parse(config_options, opt_name, opt_value, base_addr));
+  TestAndCompareOption(config_options, opt_info, opt_name, base_ptr, comp_ptr);
+}
+
+template <typename T>
+void TestOptInfo(const ConfigOptions& config_options, OptionType opt_type,
+                 T* base, T* comp) {
+  std::string result;
+  OptionTypeInfo opt_info(0, opt_type);
+  char* base_addr = reinterpret_cast<char*>(base);
+  char* comp_addr = reinterpret_cast<char*>(comp);
+  ASSERT_FALSE(
+      opt_info.AreEqual(config_options, "base", base_addr, comp_addr, &result));
+  ASSERT_EQ(result, "base");
+  ASSERT_NE(*base, *comp);
+  TestAndCompareOption(config_options, opt_info, "base", base_addr, comp_addr);
+  ASSERT_EQ(*base, *comp);
+}
+
+class OptionTypeInfoTest : public testing::Test {};
+
+TEST_F(OptionTypeInfoTest, BasicTypes) {
+  ConfigOptions config_options;
+  {
+    bool a = true, b = false;
+    TestOptInfo(config_options, OptionType::kBoolean, &a, &b);
+  }
+  {
+    int a = 100, b = 200;
+    TestOptInfo(config_options, OptionType::kInt, &a, &b);
+  }
+  {
+    int32_t a = 100, b = 200;
+    TestOptInfo(config_options, OptionType::kInt32T, &a, &b);
+  }
+  {
+    int64_t a = 100, b = 200;
+    TestOptInfo(config_options, OptionType::kInt64T, &a, &b);
+  }
+  {
+    unsigned int a = 100, b = 200;
+    TestOptInfo(config_options, OptionType::kUInt, &a, &b);
+  }
+  {
+    uint32_t a = 100, b = 200;
+    TestOptInfo(config_options, OptionType::kUInt32T, &a, &b);
+  }
+  {
+    uint64_t a = 100, b = 200;
+    TestOptInfo(config_options, OptionType::kUInt64T, &a, &b);
+  }
+  {
+    size_t a = 100, b = 200;
+    TestOptInfo(config_options, OptionType::kSizeT, &a, &b);
+  }
+  {
+    std::string a = "100", b = "200";
+    TestOptInfo(config_options, OptionType::kString, &a, &b);
+  }
+  {
+    double a = 1.0, b = 2.0;
+    TestOptInfo(config_options, OptionType::kDouble, &a, &b);
+  }
+}
+
+TEST_F(OptionTypeInfoTest, TestInvalidArgs) {
+  ConfigOptions config_options;
+  bool b;
+  int i;
+  int32_t i32;
+  int64_t i64;
+  unsigned int u;
+  int32_t u32;
+  int64_t u64;
+  size_t sz;
+  double d;
+
+  ASSERT_NOK(OptionTypeInfo(0, OptionType::kBoolean)
+                 .Parse(config_options, "b", "x", reinterpret_cast<char*>(&b)));
+  ASSERT_NOK(OptionTypeInfo(0, OptionType::kInt)
+                 .Parse(config_options, "b", "x", reinterpret_cast<char*>(&i)));
+  ASSERT_NOK(
+      OptionTypeInfo(0, OptionType::kInt32T)
+          .Parse(config_options, "b", "x", reinterpret_cast<char*>(&i32)));
+  ASSERT_NOK(
+      OptionTypeInfo(0, OptionType::kInt64T)
+          .Parse(config_options, "b", "x", reinterpret_cast<char*>(&i64)));
+  ASSERT_NOK(OptionTypeInfo(0, OptionType::kUInt)
+                 .Parse(config_options, "b", "x", reinterpret_cast<char*>(&u)));
+  ASSERT_NOK(
+      OptionTypeInfo(0, OptionType::kUInt32T)
+          .Parse(config_options, "b", "x", reinterpret_cast<char*>(&u32)));
+  ASSERT_NOK(
+      OptionTypeInfo(0, OptionType::kUInt64T)
+          .Parse(config_options, "b", "x", reinterpret_cast<char*>(&u64)));
+  ASSERT_NOK(
+      OptionTypeInfo(0, OptionType::kSizeT)
+          .Parse(config_options, "b", "x", reinterpret_cast<char*>(&sz)));
+  ASSERT_NOK(OptionTypeInfo(0, OptionType::kDouble)
+                 .Parse(config_options, "b", "x", reinterpret_cast<char*>(&d)));
+
+  // Don't know how to convert Unknowns to anything else
+  ASSERT_NOK(OptionTypeInfo(0, OptionType::kUnknown)
+                 .Parse(config_options, "b", "x", reinterpret_cast<char*>(&d)));
+
+  // Verify that if the parse function throws an exception, it is also trapped
+  OptionTypeInfo func_info(0, OptionType::kUnknown,
+                           OptionVerificationType::kNormal,
+                           OptionTypeFlags::kNone, 0,
+                           [](const ConfigOptions&, const std::string&,
+                              const std::string& value, char* addr) {
+                             auto ptr = reinterpret_cast<int*>(addr);
+                             *ptr = ParseInt(value);
+                             return Status::OK();
+                           });
+  ASSERT_OK(
+      func_info.Parse(config_options, "b", "1", reinterpret_cast<char*>(&i)));
+  ASSERT_NOK(
+      func_info.Parse(config_options, "b", "x", reinterpret_cast<char*>(&i)));
+}
+
+TEST_F(OptionTypeInfoTest, TestParseFunc) {
+  OptionTypeInfo opt_info(
+      0, OptionType::kUnknown, OptionVerificationType::kNormal,
+      OptionTypeFlags::kNone, 0,
+      [](const ConfigOptions& /*opts*/, const std::string& name,
+         const std::string& value, char* addr) {
+        auto ptr = reinterpret_cast<std::string*>(addr);
+        if (name == "Oops") {
+          return Status::InvalidArgument(value);
+        } else {
+          *ptr = value + " " + name;
+          return Status::OK();
+        }
+      });
+  ConfigOptions config_options;
+  std::string base;
+  ASSERT_OK(opt_info.Parse(config_options, "World", "Hello",
+                           reinterpret_cast<char*>(&base)));
+  ASSERT_EQ(base, "Hello World");
+  ASSERT_NOK(opt_info.Parse(config_options, "Oops", "Hello",
+                            reinterpret_cast<char*>(&base)));
+}
+
+TEST_F(OptionTypeInfoTest, TestSerializeFunc) {
+  OptionTypeInfo opt_info(
+      0, OptionType::kString, OptionVerificationType::kNormal,
+      OptionTypeFlags::kNone, 0, nullptr,
+      [](const ConfigOptions& /*opts*/, const std::string& name,
+         const char* /*addr*/, std::string* value) {
+        if (name == "Oops") {
+          return Status::InvalidArgument(name);
+        } else {
+          *value = name;
+          return Status::OK();
+        }
+      },
+      nullptr);
+  ConfigOptions config_options;
+  std::string base;
+  std::string value;
+  ASSERT_OK(opt_info.Serialize(config_options, "Hello",
+                               reinterpret_cast<char*>(&base), &value));
+  ASSERT_EQ(value, "Hello");
+  ASSERT_NOK(opt_info.Serialize(config_options, "Oops",
+                                reinterpret_cast<char*>(&base), &value));
+}
+
+TEST_F(OptionTypeInfoTest, TestEqualsFunc) {
+  OptionTypeInfo opt_info(
+      0, OptionType::kInt, OptionVerificationType::kNormal,
+      OptionTypeFlags::kNone, 0, nullptr, nullptr,
+      [](const ConfigOptions& /*opts*/, const std::string& name,
+         const char* addr1, const char* addr2, std::string* mismatch) {
+        auto i1 = *(reinterpret_cast<const int*>(addr1));
+        auto i2 = *(reinterpret_cast<const int*>(addr2));
+        if (name == "LT") {
+          return i1 < i2;
+        } else if (name == "GT") {
+          return i1 > i2;
+        } else if (name == "EQ") {
+          return i1 == i2;
+        } else {
+          *mismatch = name + "???";
+          return false;
+        }
+      });
+
+  ConfigOptions config_options;
+  int int1 = 100;
+  int int2 = 200;
+  std::string mismatch;
+  ASSERT_TRUE(opt_info.AreEqual(
+      config_options, "LT", reinterpret_cast<const char*>(&int1),
+      reinterpret_cast<const char*>(&int2), &mismatch));
+  ASSERT_EQ(mismatch, "");
+  ASSERT_FALSE(opt_info.AreEqual(config_options, "GT",
+                                 reinterpret_cast<char*>(&int1),
+                                 reinterpret_cast<char*>(&int2), &mismatch));
+  ASSERT_EQ(mismatch, "GT");
+  ASSERT_FALSE(opt_info.AreEqual(config_options, "NO",
+                                 reinterpret_cast<char*>(&int1),
+                                 reinterpret_cast<char*>(&int2), &mismatch));
+  ASSERT_EQ(mismatch, "NO???");
+}
+
+TEST_F(OptionTypeInfoTest, TestOptionFlags) {
+  OptionTypeInfo opt_none(0, OptionType::kString,
+                          OptionVerificationType::kNormal,
+                          OptionTypeFlags::kDontSerialize, 0);
+  OptionTypeInfo opt_never(0, OptionType::kString,
+                           OptionVerificationType::kNormal,
+                           OptionTypeFlags::kCompareNever, 0);
+  OptionTypeInfo opt_alias(0, OptionType::kString,
+                           OptionVerificationType::kAlias,
+                           OptionTypeFlags::kNone, 0);
+  OptionTypeInfo opt_deprecated(0, OptionType::kString,
+                                OptionVerificationType::kDeprecated,
+                                OptionTypeFlags::kNone, 0);
+  ConfigOptions config_options;
+  std::string base = "base";
+  std::string comp = "comp";
+
+  // If marked string none, the serialization returns okay but does nothing
+  ASSERT_OK(opt_none.Serialize(config_options, "None",
+                               reinterpret_cast<char*>(&base), &base));
+  // If marked never compare, they match even when they do not
+  ASSERT_TRUE(opt_never.AreEqual(config_options, "Never",
+                                 reinterpret_cast<char*>(&base),
+                                 reinterpret_cast<char*>(&comp), &base));
+  ASSERT_FALSE(opt_none.AreEqual(config_options, "Never",
+                                 reinterpret_cast<char*>(&base),
+                                 reinterpret_cast<char*>(&comp), &base));
+
+  // An alias can change the value via parse, but does nothing on serialize on
+  // match
+  std::string result;
+  ASSERT_OK(opt_alias.Parse(config_options, "Alias", "Alias",
+                            reinterpret_cast<char*>(&base)));
+  ASSERT_OK(opt_alias.Serialize(config_options, "Alias",
+                                reinterpret_cast<char*>(&base), &result));
+  ASSERT_TRUE(opt_alias.AreEqual(config_options, "Alias",
+                                 reinterpret_cast<char*>(&base),
+                                 reinterpret_cast<char*>(&comp), &result));
+  ASSERT_EQ(base, "Alias");
+  ASSERT_NE(base, comp);
+
+  // Deprecated options do nothing on any of the commands
+  ASSERT_OK(opt_deprecated.Parse(config_options, "Alias", "Deprecated",
+                                 reinterpret_cast<char*>(&base)));
+  ASSERT_OK(opt_deprecated.Serialize(config_options, "Alias",
+                                     reinterpret_cast<char*>(&base), &result));
+  ASSERT_TRUE(opt_deprecated.AreEqual(config_options, "Alias",
+                                      reinterpret_cast<char*>(&base),
+                                      reinterpret_cast<char*>(&comp), &result));
+  ASSERT_EQ(base, "Alias");
+  ASSERT_NE(base, comp);
+}
+
+TEST_F(OptionTypeInfoTest, TestCustomEnum) {
+  enum TestEnum { kA, kB, kC };
+  std::unordered_map<std::string, TestEnum> enum_map = {
+      {"A", TestEnum::kA},
+      {"B", TestEnum::kB},
+      {"C", TestEnum::kC},
+  };
+  OptionTypeInfo opt_info = OptionTypeInfo::Enum<TestEnum>(0, &enum_map);
+  TestEnum e1, e2;
+  ConfigOptions config_options;
+  std::string result, mismatch;
+
+  e2 = TestEnum::kA;
+
+  ASSERT_OK(
+      opt_info.Parse(config_options, "", "B", reinterpret_cast<char*>(&e1)));
+  ASSERT_OK(opt_info.Serialize(config_options, "", reinterpret_cast<char*>(&e1),
+                               &result));
+  ASSERT_EQ(e1, TestEnum::kB);
+  ASSERT_EQ(result, "B");
+
+  ASSERT_FALSE(opt_info.AreEqual(config_options, "Enum",
+                                 reinterpret_cast<char*>(&e1),
+                                 reinterpret_cast<char*>(&e2), &mismatch));
+  ASSERT_EQ(mismatch, "Enum");
+
+  TestAndCompareOption(config_options, opt_info, "", "C",
+                       reinterpret_cast<char*>(&e1),
+                       reinterpret_cast<char*>(&e2));
+  ASSERT_EQ(e2, TestEnum::kC);
+
+  ASSERT_NOK(
+      opt_info.Parse(config_options, "", "D", reinterpret_cast<char*>(&e1)));
+  ASSERT_EQ(e1, TestEnum::kC);
+}
+
+TEST_F(OptionTypeInfoTest, TestBuiltinEnum) {
+  ConfigOptions config_options;
+  for (auto iter : OptionsHelper::compaction_style_string_map) {
+    CompactionStyle e1, e2;
+    TestAndCompareOption(config_options,
+                         OptionTypeInfo(0, OptionType::kCompactionStyle),
+                         "CompactionStyle", iter.first, &e1, &e2);
+    ASSERT_EQ(e1, iter.second);
+  }
+  for (auto iter : OptionsHelper::compaction_pri_string_map) {
+    CompactionPri e1, e2;
+    TestAndCompareOption(config_options,
+                         OptionTypeInfo(0, OptionType::kCompactionPri),
+                         "CompactionPri", iter.first, &e1, &e2);
+    ASSERT_EQ(e1, iter.second);
+  }
+  for (auto iter : OptionsHelper::compression_type_string_map) {
+    CompressionType e1, e2;
+    TestAndCompareOption(config_options,
+                         OptionTypeInfo(0, OptionType::kCompressionType),
+                         "CompressionType", iter.first, &e1, &e2);
+    ASSERT_EQ(e1, iter.second);
+  }
+  for (auto iter : OptionsHelper::compaction_stop_style_string_map) {
+    CompactionStopStyle e1, e2;
+    TestAndCompareOption(config_options,
+                         OptionTypeInfo(0, OptionType::kCompactionStopStyle),
+                         "CompactionStopStyle", iter.first, &e1, &e2);
+    ASSERT_EQ(e1, iter.second);
+  }
+  for (auto iter : OptionsHelper::checksum_type_string_map) {
+    ChecksumType e1, e2;
+    TestAndCompareOption(config_options,
+                         OptionTypeInfo(0, OptionType::kChecksumType),
+                         "CheckSumType", iter.first, &e1, &e2);
+    ASSERT_EQ(e1, iter.second);
+  }
+  for (auto iter : OptionsHelper::encoding_type_string_map) {
+    EncodingType e1, e2;
+    TestAndCompareOption(config_options,
+                         OptionTypeInfo(0, OptionType::kEncodingType),
+                         "EncodingType", iter.first, &e1, &e2);
+    ASSERT_EQ(e1, iter.second);
+  }
+}
+
+TEST_F(OptionTypeInfoTest, TestStruct) {
+  struct Basic {
+    int i = 42;
+    std::string s = "Hello";
+  };
+
+  struct Extended {
+    int j = 11;
+    Basic b;
+  };
+
+  std::unordered_map<std::string, OptionTypeInfo> basic_type_map = {
+      {"i", {offsetof(struct Basic, i), OptionType::kInt}},
+      {"s", {offsetof(struct Basic, s), OptionType::kString}},
+  };
+  OptionTypeInfo basic_info = OptionTypeInfo::Struct(
+      "b", &basic_type_map, 0, OptionVerificationType::kNormal,
+      OptionTypeFlags::kMutable, 0);
+
+  std::unordered_map<std::string, OptionTypeInfo> extended_type_map = {
+      {"j", {offsetof(struct Extended, j), OptionType::kInt}},
+      {"b", OptionTypeInfo::Struct(
+                "b", &basic_type_map, offsetof(struct Extended, b),
+                OptionVerificationType::kNormal, OptionTypeFlags::kNone, 0)},
+      {"m", OptionTypeInfo::Struct(
+                "m", &basic_type_map, offsetof(struct Extended, b),
+                OptionVerificationType::kNormal, OptionTypeFlags::kMutable,
+                offsetof(struct Extended, b))},
+  };
+  OptionTypeInfo extended_info = OptionTypeInfo::Struct(
+      "e", &extended_type_map, 0, OptionVerificationType::kNormal,
+      OptionTypeFlags::kMutable, 0);
+  Extended e1, e2;
+  ConfigOptions config_options;
+  std::string mismatch;
+  TestAndCompareOption(config_options, basic_info, "b", "{i=33;s=33}", &e1.b,
+                       &e2.b);
+  ASSERT_EQ(e1.b.i, 33);
+  ASSERT_EQ(e1.b.s, "33");
+
+  TestAndCompareOption(config_options, basic_info, "b.i", "44", &e1.b, &e2.b);
+  ASSERT_EQ(e1.b.i, 44);
+
+  TestAndCompareOption(config_options, basic_info, "i", "55", &e1.b, &e2.b);
+  ASSERT_EQ(e1.b.i, 55);
+
+  e1.b.i = 0;
+  auto e1bc = reinterpret_cast<char*>(&e1.b);
+  auto e2bc = reinterpret_cast<char*>(&e2.b);
+
+  ASSERT_FALSE(basic_info.AreEqual(config_options, "b", e1bc, e2bc, &mismatch));
+  ASSERT_EQ(mismatch, "b.i");
+  mismatch.clear();
+  ASSERT_FALSE(
+      basic_info.AreEqual(config_options, "b.i", e1bc, e2bc, &mismatch));
+  ASSERT_EQ(mismatch, "b.i");
+  mismatch.clear();
+  ASSERT_FALSE(basic_info.AreEqual(config_options, "i", e1bc, e2bc, &mismatch));
+  ASSERT_EQ(mismatch, "b.i");
+  mismatch.clear();
+
+  e1 = e2;
+  ASSERT_NOK(basic_info.Parse(config_options, "b", "{i=33;s=33;j=44}", e1bc));
+  ASSERT_TRUE(
+      basic_info.AreEqual(config_options, "b.i", e1bc, e2bc, &mismatch));
+  ASSERT_NOK(basic_info.Parse(config_options, "b.j", "44", e1bc));
+  ASSERT_TRUE(
+      basic_info.AreEqual(config_options, "b.i", e1bc, e2bc, &mismatch));
+  ASSERT_NOK(basic_info.Parse(config_options, "j", "44", e1bc));
+  ASSERT_TRUE(
+      basic_info.AreEqual(config_options, "b.i", e1bc, e2bc, &mismatch));
+
+  TestAndCompareOption(config_options, extended_info, "e",
+                       "b={i=55;s=55}; j=22;", &e1, &e2);
+  ASSERT_EQ(e1.b.i, 55);
+  ASSERT_EQ(e1.j, 22);
+  ASSERT_EQ(e1.b.s, "55");
+  TestAndCompareOption(config_options, extended_info, "e.b", "{i=66;s=66;}",
+                       &e1, &e2);
+  ASSERT_EQ(e1.b.i, 66);
+  ASSERT_EQ(e1.j, 22);
+  ASSERT_EQ(e1.b.s, "66");
+  TestAndCompareOption(config_options, extended_info, "e.b.i", "77", &e1, &e2);
+  ASSERT_EQ(e1.b.i, 77);
+  ASSERT_EQ(e1.j, 22);
+  ASSERT_EQ(e1.b.s, "66");
+}
+
+TEST_F(OptionTypeInfoTest, TestVectorType) {
+  OptionTypeInfo vec_info = OptionTypeInfo::Vector<std::string>(
+      0, OptionVerificationType::kNormal, OptionTypeFlags::kNone, 0,
+      {0, OptionType::kString});
+  std::vector<std::string> vec1, vec2;
+  std::string mismatch;
+
+  ConfigOptions config_options;
+  TestAndCompareOption(config_options, vec_info, "v", "a:b:c:d", &vec1, &vec2);
+  ASSERT_EQ(vec1.size(), 4);
+  ASSERT_EQ(vec1[0], "a");
+  ASSERT_EQ(vec1[1], "b");
+  ASSERT_EQ(vec1[2], "c");
+  ASSERT_EQ(vec1[3], "d");
+  vec1[3] = "e";
+  ASSERT_FALSE(vec_info.AreEqual(config_options, "v",
+                                 reinterpret_cast<char*>(&vec1),
+                                 reinterpret_cast<char*>(&vec2), &mismatch));
+  ASSERT_EQ(mismatch, "v");
+
+  // Test vectors with inner brackets
+  TestAndCompareOption(config_options, vec_info, "v", "a:{b}:c:d", &vec1,
+                       &vec2);
+  ASSERT_EQ(vec1.size(), 4);
+  ASSERT_EQ(vec1[0], "a");
+  ASSERT_EQ(vec1[1], "b");
+  ASSERT_EQ(vec1[2], "c");
+  ASSERT_EQ(vec1[3], "d");
+
+  OptionTypeInfo bar_info = OptionTypeInfo::Vector<std::string>(
+      0, OptionVerificationType::kNormal, OptionTypeFlags::kNone, 0,
+      {0, OptionType::kString}, '|');
+  TestAndCompareOption(config_options, vec_info, "v", "x|y|z", &vec1, &vec2);
+  // Test vectors with inner vector
+  TestAndCompareOption(config_options, bar_info, "v",
+                       "a|{b1|b2}|{c1|c2|{d1|d2}}", &vec1, &vec2);
+  ASSERT_EQ(vec1.size(), 3);
+  ASSERT_EQ(vec1[0], "a");
+  ASSERT_EQ(vec1[1], "b1|b2");
+  ASSERT_EQ(vec1[2], "c1|c2|{d1|d2}");
 }
 #endif  // !ROCKSDB_LITE
 }  // namespace ROCKSDB_NAMESPACE

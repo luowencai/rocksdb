@@ -186,6 +186,9 @@ DEFINE_int64(compressed_cache_size, -1,
 DEFINE_int32(compaction_style, ROCKSDB_NAMESPACE::Options().compaction_style,
              "");
 
+DEFINE_int32(num_levels, ROCKSDB_NAMESPACE::Options().num_levels,
+             "Number of levels in the DB");
+
 DEFINE_int32(level0_file_num_compaction_trigger,
              ROCKSDB_NAMESPACE::Options().level0_file_num_compaction_trigger,
              "Level0 compaction start trigger");
@@ -584,6 +587,9 @@ DEFINE_int32(compression_zstd_max_train_bytes, 0,
              "Maximum size of training data passed to zstd's dictionary "
              "trainer.");
 
+DEFINE_int32(compression_parallel_threads, 1,
+             "Number of threads for parallel compression.");
+
 DEFINE_string(bottommost_compression_type, "disable",
               "Algorithm to use to compress bottommost level of the database. "
               "\"disable\" means disabling the feature");
@@ -685,4 +691,8 @@ DEFINE_int32(read_fault_one_in, 1000,
 DEFINE_bool(sync_fault_injection, false,
             "If true, FaultInjectionTestFS will be used for write operations, "
             " and unsynced data in DB will lost after crash.");
+
+DEFINE_bool(best_efforts_recovery, false,
+            "If true, use best efforts recovery.");
+DEFINE_bool(skip_verifydb, false, "If true, skip VerifyDb() calls.");
 #endif  // GFLAGS

@@ -112,6 +112,7 @@ DECLARE_bool(memtable_whole_key_filtering);
 DECLARE_int32(open_files);
 DECLARE_int64(compressed_cache_size);
 DECLARE_int32(compaction_style);
+DECLARE_int32(num_levels);
 DECLARE_int32(level0_file_num_compaction_trigger);
 DECLARE_int32(level0_slowdown_writes_trigger);
 DECLARE_int32(level0_stop_writes_trigger);
@@ -201,6 +202,7 @@ DECLARE_string(compression_type);
 DECLARE_string(bottommost_compression_type);
 DECLARE_int32(compression_max_dict_bytes);
 DECLARE_int32(compression_zstd_max_train_bytes);
+DECLARE_int32(compression_parallel_threads);
 DECLARE_string(checksum_type);
 DECLARE_string(hdfs);
 DECLARE_string(env_uri);
@@ -233,6 +235,9 @@ DECLARE_double(blob_db_gc_cutoff);
 #endif  // !ROCKSDB_LITE
 DECLARE_int32(approximate_size_one_in);
 DECLARE_bool(sync_fault_injection);
+
+DECLARE_bool(best_efforts_recovery);
+DECLARE_bool(skip_verifydb);
 
 const long KB = 1024;
 const int kRandomValueMaxFactor = 3;

@@ -15,9 +15,12 @@
 #include <utility>
 #include <vector>
 
+#include "cache/sharded_cache.h"
+
 #include "db/dbformat.h"
 #include "db/pinned_iterators_manager.h"
 #include "file/file_prefetch_buffer.h"
+#include "file/file_util.h"
 #include "file/random_access_file_reader.h"
 #include "monitoring/perf_context_imp.h"
 #include "options/options_helper.h"
@@ -52,7 +55,6 @@
 #include "table/sst_file_writer_collectors.h"
 #include "table/two_level_iterator.h"
 
-#include "test_util/testharness.h"
 #include "monitoring/perf_context_imp.h"
 #include "port/lang.h"
 #include "test_util/sync_point.h"
@@ -338,15 +340,22 @@ void BlockBasedTable::UpdateCacheMissMetrics(BlockType block_type,
 
 void BlockBasedTable::UpdateCacheInsertionMetrics(BlockType block_type,
                                                   GetContext* get_context,
-                                                  size_t usage) const {
+                                                  size_t usage,
+                                                  bool redundant) const {
   Statistics* const statistics = rep_->ioptions.statistics;
 
   // TODO: introduce perf counters for block cache insertions
   if (get_context) {
     ++get_context->get_context_stats_.num_cache_add;
+    if (redundant) {
+      ++get_context->get_context_stats_.num_cache_add_redundant;
+    }
     get_context->get_context_stats_.num_cache_bytes_write += usage;
   } else {
     RecordTick(statistics, BLOCK_CACHE_ADD);
+    if (redundant) {
+      RecordTick(statistics, BLOCK_CACHE_ADD_REDUNDANT);
+    }
     RecordTick(statistics, BLOCK_CACHE_BYTES_WRITE, usage);
   }
 
@@ -354,9 +363,15 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(BlockType block_type,
     case BlockType::kFilter:
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_filter_add;
+        if (redundant) {
+          ++get_context->get_context_stats_.num_cache_filter_add_redundant;
+        }
         get_context->get_context_stats_.num_cache_filter_bytes_insert += usage;
       } else {
         RecordTick(statistics, BLOCK_CACHE_FILTER_ADD);
+        if (redundant) {
+          RecordTick(statistics, BLOCK_CACHE_FILTER_ADD_REDUNDANT);
+        }
         RecordTick(statistics, BLOCK_CACHE_FILTER_BYTES_INSERT, usage);
       }
       break;
@@ -364,10 +379,17 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(BlockType block_type,
     case BlockType::kCompressionDictionary:
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_compression_dict_add;
+        if (redundant) {
+          ++get_context->get_context_stats_
+                .num_cache_compression_dict_add_redundant;
+        }
         get_context->get_context_stats_
             .num_cache_compression_dict_bytes_insert += usage;
       } else {
         RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_ADD);
+        if (redundant) {
+          RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_ADD_REDUNDANT);
+        }
         RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_BYTES_INSERT,
                    usage);
       }
@@ -376,9 +398,15 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(BlockType block_type,
     case BlockType::kIndex:
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_index_add;
+        if (redundant) {
+          ++get_context->get_context_stats_.num_cache_index_add_redundant;
+        }
         get_context->get_context_stats_.num_cache_index_bytes_insert += usage;
       } else {
         RecordTick(statistics, BLOCK_CACHE_INDEX_ADD);
+        if (redundant) {
+          RecordTick(statistics, BLOCK_CACHE_INDEX_ADD_REDUNDANT);
+        }
         RecordTick(statistics, BLOCK_CACHE_INDEX_BYTES_INSERT, usage);
       }
       break;
@@ -388,9 +416,15 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(BlockType block_type,
       // for range tombstones
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_data_add;
+        if (redundant) {
+          ++get_context->get_context_stats_.num_cache_data_add_redundant;
+        }
         get_context->get_context_stats_.num_cache_data_bytes_insert += usage;
       } else {
         RecordTick(statistics, BLOCK_CACHE_DATA_ADD);
+        if (redundant) {
+          RecordTick(statistics, BLOCK_CACHE_DATA_ADD_REDUNDANT);
+        }
         RecordTick(statistics, BLOCK_CACHE_DATA_BYTES_INSERT, usage);
       }
       break;
@@ -418,44 +452,21 @@ void BlockBasedTable::SetupCacheKeyPrefix(Rep* rep) {
   rep->cache_key_prefix_size = 0;
   rep->compressed_cache_key_prefix_size = 0;
   if (rep->table_options.block_cache != nullptr) {
-    GenerateCachePrefix(rep->table_options.block_cache.get(), rep->file->file(),
-                        &rep->cache_key_prefix[0], &rep->cache_key_prefix_size);
+    GenerateCachePrefix<Cache, FSRandomAccessFile>(
+        rep->table_options.block_cache.get(), rep->file->file(),
+        &rep->cache_key_prefix[0], &rep->cache_key_prefix_size);
   }
   if (rep->table_options.persistent_cache != nullptr) {
-    GenerateCachePrefix(/*cache=*/nullptr, rep->file->file(),
-                        &rep->persistent_cache_key_prefix[0],
-                        &rep->persistent_cache_key_prefix_size);
+    GenerateCachePrefix<PersistentCache, FSRandomAccessFile>(
+        rep->table_options.persistent_cache.get(), rep->file->file(),
+        &rep->persistent_cache_key_prefix[0],
+        &rep->persistent_cache_key_prefix_size);
   }
   if (rep->table_options.block_cache_compressed != nullptr) {
-    GenerateCachePrefix(rep->table_options.block_cache_compressed.get(),
-                        rep->file->file(), &rep->compressed_cache_key_prefix[0],
-                        &rep->compressed_cache_key_prefix_size);
-  }
-}
-
-void BlockBasedTable::GenerateCachePrefix(Cache* cc, FSRandomAccessFile* file,
-                                          char* buffer, size_t* size) {
-  // generate an id from the file
-  *size = file->GetUniqueId(buffer, kMaxCacheKeyPrefixSize);
-
-  // If the prefix wasn't generated or was too long,
-  // create one from the cache.
-  if (cc != nullptr && *size == 0) {
-    char* end = EncodeVarint64(buffer, cc->NewId());
-    *size = static_cast<size_t>(end - buffer);
-  }
-}
-
-void BlockBasedTable::GenerateCachePrefix(Cache* cc, FSWritableFile* file,
-                                          char* buffer, size_t* size) {
-  // generate an id from the file
-  *size = file->GetUniqueId(buffer, kMaxCacheKeyPrefixSize);
-
-  // If the prefix wasn't generated or was too long,
-  // create one from the cache.
-  if (cc != nullptr && *size == 0) {
-    char* end = EncodeVarint64(buffer, cc->NewId());
-    *size = static_cast<size_t>(end - buffer);
+    GenerateCachePrefix<Cache, FSRandomAccessFile>(
+        rep->table_options.block_cache_compressed.get(), rep->file->file(),
+        &rep->compressed_cache_key_prefix[0],
+        &rep->compressed_cache_key_prefix_size);
   }
 }
 
@@ -574,8 +585,10 @@ Status BlockBasedTable::Open(
     const SliceTransform* prefix_extractor,
     const bool prefetch_index_and_filter_in_cache, const bool skip_filters,
     const int level, const bool immortal_table,
-    const SequenceNumber largest_seqno, TailPrefetchStats* tail_prefetch_stats,
-    BlockCacheTracer* const block_cache_tracer) {
+    const SequenceNumber largest_seqno, const bool force_direct_prefetch,
+    TailPrefetchStats* tail_prefetch_stats,
+    BlockCacheTracer* const block_cache_tracer,
+    size_t max_file_size_for_l0_meta_pin) {
   table_reader->reset();
 
   Status s;
@@ -587,8 +600,9 @@ Status BlockBasedTable::Open(
   const bool preload_all = !table_options.cache_index_and_filter_blocks;
 
   if (!ioptions.allow_mmap_reads) {
-    s = PrefetchTail(file.get(), file_size, tail_prefetch_stats, prefetch_all,
-                     preload_all, &prefetch_buffer);
+    s = PrefetchTail(file.get(), file_size, force_direct_prefetch,
+                     tail_prefetch_stats, prefetch_all, preload_all,
+                     &prefetch_buffer);
   } else {
     // Should not prefetch for mmap mode.
     prefetch_buffer.reset(new FilePrefetchBuffer(
@@ -620,8 +634,8 @@ Status BlockBasedTable::Open(
   // access a dangling pointer.
   BlockCacheLookupContext lookup_context{TableReaderCaller::kPrefetch};
   Rep* rep = new BlockBasedTable::Rep(ioptions, env_options, table_options,
-                                      internal_comparator, skip_filters, level,
-                                      immortal_table);
+                                      internal_comparator, skip_filters,
+                                      file_size, level, immortal_table);
   rep->file = std::move(file);
   rep->footer = footer;
   rep->hash_index_allow_collision = table_options.hash_index_allow_collision;
@@ -670,7 +684,8 @@ Status BlockBasedTable::Open(
   }
   s = new_table->PrefetchIndexAndFilterBlocks(
       prefetch_buffer.get(), metaindex_iter.get(), new_table.get(),
-      prefetch_all, table_options, level, &lookup_context);
+      prefetch_all, table_options, level, file_size,
+      max_file_size_for_l0_meta_pin, &lookup_context);
 
   if (s.ok()) {
     // Update tail prefetch stats
@@ -689,8 +704,8 @@ Status BlockBasedTable::Open(
 
 Status BlockBasedTable::PrefetchTail(
     RandomAccessFileReader* file, uint64_t file_size,
-    TailPrefetchStats* tail_prefetch_stats, const bool prefetch_all,
-    const bool preload_all,
+    bool force_direct_prefetch, TailPrefetchStats* tail_prefetch_stats,
+    const bool prefetch_all, const bool preload_all,
     std::unique_ptr<FilePrefetchBuffer>* prefetch_buffer) {
   size_t tail_prefetch_size = 0;
   if (tail_prefetch_stats != nullptr) {
@@ -720,7 +735,7 @@ Status BlockBasedTable::PrefetchTail(
                            &tail_prefetch_size);
   Status s;
   // TODO should not have this special logic in the future.
-  if (!file->use_direct_io()) {
+  if (!file->use_direct_io() && !force_direct_prefetch) {
     prefetch_buffer->reset(new FilePrefetchBuffer(
         nullptr, 0, 0, false /* enable */, true /* track_min_offset */));
     s = file->Prefetch(prefetch_off, prefetch_len);
@@ -732,7 +747,6 @@ Status BlockBasedTable::PrefetchTail(
 
   return s;
 }
-
 
 Status BlockBasedTable::TryReadPropertiesWithGlobalSeqno(
     FilePrefetchBuffer* prefetch_buffer, const Slice& handle_value,
@@ -908,6 +922,7 @@ Status BlockBasedTable::PrefetchIndexAndFilterBlocks(
     FilePrefetchBuffer* prefetch_buffer, InternalIterator* meta_iter,
     BlockBasedTable* new_table, bool prefetch_all,
     const BlockBasedTableOptions& table_options, const int level,
+    size_t file_size, size_t max_file_size_for_l0_meta_pin,
     BlockCacheLookupContext* lookup_context) {
   Status s;
 
@@ -952,9 +967,10 @@ Status BlockBasedTable::PrefetchIndexAndFilterBlocks(
 
   const bool use_cache = table_options.cache_index_and_filter_blocks;
 
-  // pin both index and filters, down to all partitions
+  // pin both index and filters, down to all partitions.
   const bool pin_all =
-      rep_->table_options.pin_l0_filter_and_index_blocks_in_cache && level == 0;
+      rep_->table_options.pin_l0_filter_and_index_blocks_in_cache &&
+      level == 0 && file_size <= max_file_size_for_l0_meta_pin;
 
   // prefetch the first level of index
   const bool prefetch_index =
@@ -1182,7 +1198,8 @@ Status BlockBasedTable::GetDataBlockFromCache(
         block->SetCachedValue(block_holder.release(), block_cache,
                               cache_handle);
 
-        UpdateCacheInsertionMetrics(block_type, get_context, charge);
+        UpdateCacheInsertionMetrics(block_type, get_context, charge,
+                                    s.IsOkOverwritten());
       } else {
         RecordTick(statistics, BLOCK_CACHE_ADD_FAILURES);
       }
@@ -1287,7 +1304,8 @@ Status BlockBasedTable::PutDataBlockToCache(
       cached_block->SetCachedValue(block_holder.release(), block_cache,
                                    cache_handle);
 
-      UpdateCacheInsertionMetrics(block_type, get_context, charge);
+      UpdateCacheInsertionMetrics(block_type, get_context, charge,
+                                  s.IsOkOverwritten());
     } else {
       RecordTick(statistics, BLOCK_CACHE_ADD_FAILURES);
     }
@@ -1556,7 +1574,7 @@ void BlockBasedTable::RetrieveMultipleBlocks(
   size_t read_amp_bytes_per_bit = rep_->table_options.read_amp_bytes_per_bit;
   MemoryAllocator* memory_allocator = GetMemoryAllocator(rep_->table_options);
 
-  if (file->use_direct_io() || ioptions.allow_mmap_reads) {
+  if (ioptions.allow_mmap_reads) {
     size_t idx_in_batch = 0;
     for (auto mget_iter = batch->begin(); mget_iter != batch->end();
          ++mget_iter, ++idx_in_batch) {
@@ -1575,6 +1593,10 @@ void BlockBasedTable::RetrieveMultipleBlocks(
     }
     return;
   }
+
+  // In direct IO mode, blocks share the direct io buffer.
+  // Otherwise, blocks share the scratch buffer.
+  const bool use_shared_buffer = file->use_direct_io() || scratch != nullptr;
 
   autovector<FSReadRequest, MultiGetContext::MAX_BATCH_SIZE> read_reqs;
   size_t buf_offset = 0;
@@ -1596,7 +1618,11 @@ void BlockBasedTable::RetrieveMultipleBlocks(
     // If current block is adjacent to the previous one, at the same time,
     // compression is enabled and there is no compressed cache, we combine
     // the two block read as one.
-    if (scratch != nullptr && prev_end == handle.offset()) {
+    // We don't combine block reads here in direct IO mode, because when doing
+    // direct IO read, the block requests will be realigned and merged when
+    // necessary.
+    if (use_shared_buffer && !file->use_direct_io() &&
+        prev_end == handle.offset()) {
       req_offset_for_block.emplace_back(prev_len);
       prev_len += block_size(handle);
     } else {
@@ -1606,11 +1632,13 @@ void BlockBasedTable::RetrieveMultipleBlocks(
         FSReadRequest req;
         req.offset = prev_offset;
         req.len = prev_len;
-        if (scratch == nullptr) {
-          req.scratch = new char[req.len];
-        } else {
+        if (file->use_direct_io()) {
+          req.scratch = nullptr;
+        } else if (use_shared_buffer) {
           req.scratch = scratch + buf_offset;
           buf_offset += req.len;
+        } else {
+          req.scratch = new char[req.len];
         }
         read_reqs.emplace_back(req);
       }
@@ -1627,15 +1655,28 @@ void BlockBasedTable::RetrieveMultipleBlocks(
     FSReadRequest req;
     req.offset = prev_offset;
     req.len = prev_len;
-    if (scratch == nullptr) {
-      req.scratch = new char[req.len];
-    } else {
+    if (file->use_direct_io()) {
+      req.scratch = nullptr;
+    } else if (use_shared_buffer) {
       req.scratch = scratch + buf_offset;
+    } else {
+      req.scratch = new char[req.len];
     }
     read_reqs.emplace_back(req);
   }
 
-  file->MultiRead(&read_reqs[0], read_reqs.size(), nullptr);
+  AlignedBuf direct_io_buf;
+  {
+    IOOptions opts;
+    IOStatus s = PrepareIOFromReadOptions(options, file->env(), opts);
+    if (s.IsTimedOut()) {
+      for (FSReadRequest& req : read_reqs) {
+        req.status = s;
+      }
+    } else {
+      file->MultiRead(opts, &read_reqs[0], read_reqs.size(), &direct_io_buf);
+    }
+  }
 
   idx_in_batch = 0;
   size_t valid_batch_idx = 0;
@@ -1656,7 +1697,8 @@ void BlockBasedTable::RetrieveMultipleBlocks(
     FSReadRequest& req = read_reqs[req_idx];
     Status s = req.status;
     if (s.ok()) {
-      if (req.result.size() != req.len) {
+      if ((req.result.size() != req.len) ||
+          (req_offset + block_size(handle) > req.result.size())) {
         s = Status::Corruption(
             "truncated block read from " + rep_->file->file_name() +
             " offset " + ToString(handle.offset()) + ", expected " +
@@ -1665,32 +1707,26 @@ void BlockBasedTable::RetrieveMultipleBlocks(
     }
 
     BlockContents raw_block_contents;
-    size_t cur_read_end = req_offset + block_size(handle);
-    if (cur_read_end > req.result.size()) {
-      s = Status::Corruption(
-          "truncated block read from " + rep_->file->file_name() + " offset " +
-          ToString(handle.offset()) + ", expected " + ToString(req.len) +
-          " bytes, got " + ToString(req.result.size()));
-    }
-
-    bool blocks_share_read_buffer = (req.result.size() != block_size(handle));
     if (s.ok()) {
-      if (scratch == nullptr && !blocks_share_read_buffer) {
+      if (!use_shared_buffer) {
         // We allocated a buffer for this block. Give ownership of it to
         // BlockContents so it can free the memory
         assert(req.result.data() == req.scratch);
-        std::unique_ptr<char[]> raw_block(req.scratch + req_offset);
+        assert(req.result.size() == block_size(handle));
+        assert(req_offset == 0);
+        std::unique_ptr<char[]> raw_block(req.scratch);
         raw_block_contents = BlockContents(std::move(raw_block), handle.size());
       } else {
-        // We used the scratch buffer which are shared by the blocks.
+        // We used the scratch buffer or direct io buffer
+        // which are shared by the blocks.
         // raw_block_contents does not have the ownership.
         raw_block_contents =
-            BlockContents(Slice(req.scratch + req_offset, handle.size()));
+            BlockContents(Slice(req.result.data() + req_offset, handle.size()));
       }
-
 #ifndef NDEBUG
       raw_block_contents.is_raw_block = true;
 #endif
+
       if (options.verify_checksums) {
         PERF_TIMER_GUARD(block_checksum_time);
         const char* data = req.result.data();
@@ -1701,24 +1737,25 @@ void BlockBasedTable::RetrieveMultipleBlocks(
         // begin address of each read request, we need to add the offset
         // in each read request. Checksum is stored in the block trailer,
         // which is handle.size() + 1.
-        s = ROCKSDB_NAMESPACE::VerifyChecksum(footer.checksum(),
-                                              data + req_offset,
-                                              handle.size() + 1, expected);
+        s = ROCKSDB_NAMESPACE::VerifyChecksum(
+            footer.checksum(), data + req_offset, handle.size() + 1, expected);
         TEST_SYNC_POINT_CALLBACK("RetrieveMultipleBlocks:VerifyChecksum", &s);
       }
+    } else if (!use_shared_buffer) {
+      // Free the allocated scratch buffer.
+      delete[] req.scratch;
     }
 
     if (s.ok()) {
-      // It handles a rare case: compression is set and these is no compressed
-      // cache (enable combined read). In this case, the scratch != nullptr.
-      // At the same time, some blocks are actually not compressed,
-      // since its compression space saving is smaller than the threshold. In
-      // this case, if the block shares the scratch memory, we need to copy it
-      // to the heap such that it can be added to the regular block cache.
+      // When the blocks share the same underlying buffer (scratch or direct io
+      // buffer), if the block is compressed, the shared buffer will be
+      // uncompressed into heap during uncompressing; otherwise, we need to
+      // manually copy the block into heap before inserting the block to block
+      // cache.
       CompressionType compression_type =
           raw_block_contents.get_compression_type();
-      if (scratch != nullptr && compression_type == kNoCompression) {
-        Slice raw = Slice(req.scratch + req_offset, block_size(handle));
+      if (use_shared_buffer && compression_type == kNoCompression) {
+        Slice raw = Slice(req.result.data() + req_offset, block_size(handle));
         raw_block_contents = BlockContents(
             CopyBufferToHeap(GetMemoryAllocator(rep_->table_options), raw),
             handle.size());
@@ -1760,8 +1797,10 @@ void BlockBasedTable::RetrieveMultipleBlocks(
                                     handle.size(), &contents, footer.version(),
                                     rep_->ioptions, memory_allocator);
       } else {
-        // There are two cases here: 1) caller uses the scratch buffer; 2) we
-        // use the requst buffer. If scratch buffer is used, we ensure that
+        // There are two cases here:
+        // 1) caller uses the shared buffer (scratch or direct io buffer);
+        // 2) we use the requst buffer.
+        // If scratch buffer or direct io buffer is used, we ensure that
         // all raw blocks are copyed to the heap as single blocks. If scratch
         // buffer is not used, we also have no combined read, so the raw
         // block can be used directly.
@@ -2111,14 +2150,37 @@ void BlockBasedTable::FullFilterKeysMayMatch(
   if (filter == nullptr || filter->IsBlockBased()) {
     return;
   }
+  uint64_t before_keys = range->KeysLeft();
+  assert(before_keys > 0);  // Caller should ensure
   if (rep_->whole_key_filtering) {
     filter->KeysMayMatch(range, prefix_extractor, kNotValid, no_io,
                          lookup_context);
+    uint64_t after_keys = range->KeysLeft();
+    if (after_keys) {
+      RecordTick(rep_->ioptions.statistics, BLOOM_FILTER_FULL_POSITIVE,
+                 after_keys);
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_positive, after_keys,
+                                rep_->level);
+    }
+    uint64_t filtered_keys = before_keys - after_keys;
+    if (filtered_keys) {
+      RecordTick(rep_->ioptions.statistics, BLOOM_FILTER_USEFUL, filtered_keys);
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, filtered_keys,
+                                rep_->level);
+    }
   } else if (!read_options.total_order_seek && prefix_extractor &&
              rep_->table_properties->prefix_extractor_name.compare(
                  prefix_extractor->Name()) == 0) {
     filter->PrefixesMayMatch(range, prefix_extractor, kNotValid, false,
                              lookup_context);
+    RecordTick(rep_->ioptions.statistics, BLOOM_FILTER_PREFIX_CHECKED,
+               before_keys);
+    uint64_t after_keys = range->KeysLeft();
+    uint64_t filtered_keys = before_keys - after_keys;
+    if (filtered_keys) {
+      RecordTick(rep_->ioptions.statistics, BLOOM_FILTER_PREFIX_USEFUL,
+                 filtered_keys);
+    }
   }
 }
 
@@ -2306,6 +2368,12 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
                                const MultiGetRange* mget_range,
                                const SliceTransform* prefix_extractor,
                                bool skip_filters) {
+  if (mget_range->empty()) {
+    // Caller should ensure non-empty (performance bug)
+    assert(false);
+    return;  // Nothing to do
+  }
+
   FilterBlockReader* const filter =
       !skip_filters ? rep_->filter.get() : nullptr;
   MultiGetRange sst_file_range(*mget_range, mget_range->begin(),
@@ -2315,7 +2383,7 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
   // If full filter not useful, Then go into each block
   const bool no_io = read_options.read_tier == kBlockCacheTier;
   uint64_t tracing_mget_id = BlockCacheTraceHelper::kReservedGetId;
-  if (!sst_file_range.empty() && sst_file_range.begin()->get_context) {
+  if (sst_file_range.begin()->get_context) {
     tracing_mget_id = sst_file_range.begin()->get_context->get_tracing_get_id();
   }
   BlockCacheLookupContext lookup_context{
@@ -2324,7 +2392,7 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
   FullFilterKeysMayMatch(read_options, filter, &sst_file_range, no_io,
                          prefix_extractor, &lookup_context);
 
-  if (skip_filters || !sst_file_range.empty()) {
+  if (!sst_file_range.empty()) {
     IndexBlockIter iiter_on_stack;
     // if prefix_extractor found in block differs from options, disable
     // BlockPrefixIndex. Only do this check when index_type is kHashSearch.
@@ -2353,18 +2421,7 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
 
       CachableEntry<UncompressionDict> uncompression_dict;
       Status uncompression_dict_status;
-      if (rep_->uncompression_dict_reader) {
-        uncompression_dict_status =
-            rep_->uncompression_dict_reader->GetOrReadUncompressionDictionary(
-                nullptr /* prefetch_buffer */, no_io,
-                sst_file_range.begin()->get_context, &lookup_context,
-                &uncompression_dict);
-      }
-
-      const UncompressionDict& dict = uncompression_dict.GetValue()
-                                          ? *uncompression_dict.GetValue()
-                                          : UncompressionDict::GetEmptyDict();
-
+      bool uncompression_dict_inited = false;
       size_t total_len = 0;
       ReadOptions ro = read_options;
       ro.read_tier = kBlockCacheTier;
@@ -2385,13 +2442,25 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
                               ExtractUserKey(v.first_internal_key)) < 0)) {
           // The requested key falls between highest key in previous block and
           // lowest key in current block.
-          *(miter->s) = iiter->status();
+          if (!iiter->status().IsNotFound()) {
+            *(miter->s) = iiter->status();
+          }
           data_block_range.SkipKey(miter);
           sst_file_range.SkipKey(miter);
           continue;
         }
 
+        if (!uncompression_dict_inited && rep_->uncompression_dict_reader) {
+          uncompression_dict_status =
+              rep_->uncompression_dict_reader->GetOrReadUncompressionDictionary(
+                  nullptr /* prefetch_buffer */, no_io,
+                  sst_file_range.begin()->get_context, &lookup_context,
+                  &uncompression_dict);
+          uncompression_dict_inited = true;
+        }
+
         if (!uncompression_dict_status.ok()) {
+          assert(!uncompression_dict_status.IsNotFound());
           *(miter->s) = uncompression_dict_status;
           data_block_range.SkipKey(miter);
           sst_file_range.SkipKey(miter);
@@ -2413,6 +2482,9 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
         BlockHandle handle = v.handle;
         BlockCacheLookupContext lookup_data_block_context(
             TableReaderCaller::kUserMultiGet);
+        const UncompressionDict& dict = uncompression_dict.GetValue()
+                                            ? *uncompression_dict.GetValue()
+                                            : UncompressionDict::GetEmptyDict();
         Status s = RetrieveBlock(
             nullptr, ro, handle, dict, &(results.back()), BlockType::kData,
             miter->get_context, &lookup_data_block_context,
@@ -2432,6 +2504,12 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
 
       if (total_len) {
         char* scratch = nullptr;
+        const UncompressionDict& dict = uncompression_dict.GetValue()
+                                            ? *uncompression_dict.GetValue()
+                                            : UncompressionDict::GetEmptyDict();
+        assert(uncompression_dict_inited || !rep_->uncompression_dict_reader);
+        assert(uncompression_dict_status.ok());
+        // If using direct IO, then scratch is not used, so keep it nullptr.
         // If the blocks need to be uncompressed and we don't need the
         // compressed blocks, then we can use a contiguous block of
         // memory to read in all the blocks as it will be temporary
@@ -2441,7 +2519,8 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
         // 2. If blocks are uncompressed, alloc heap bufs
         // 3. If blocks are compressed and no compressed block cache, use
         //    stack buf
-        if (rep_->table_options.block_cache_compressed == nullptr &&
+        if (!rep_->file->use_direct_io() &&
+            rep_->table_options.block_cache_compressed == nullptr &&
             rep_->blocks_maybe_compressed) {
           if (total_len <= kMultiGetReadStackBufSize) {
             scratch = stack_buf;
@@ -2604,7 +2683,7 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
         PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_true_positive, 1,
                                   rep_->level);
       }
-      if (s.ok()) {
+      if (s.ok() && !iiter->status().IsNotFound()) {
         s = iiter->status();
       }
       *(miter->s) = s;
@@ -2738,6 +2817,12 @@ Status BlockBasedTable::VerifyChecksumInBlocks(
     if (!s.ok()) {
       break;
     }
+  }
+  if (s.ok()) {
+    // In the case of two level indexes, we would have exited the above loop
+    // by checking index_iter->Valid(), but Valid() might have returned false
+    // due to an IO error. So check the index_iter status
+    s = index_iter->status();
   }
   return s;
 }
@@ -2914,30 +2999,37 @@ Status BlockBasedTable::CreateIndexReader(
   }
 }
 
-uint64_t BlockBasedTable::ApproximateOffsetOf(
-    const InternalIteratorBase<IndexValue>& index_iter) const {
-  uint64_t result = 0;
+uint64_t BlockBasedTable::ApproximateDataOffsetOf(
+    const InternalIteratorBase<IndexValue>& index_iter,
+    uint64_t data_size) const {
   if (index_iter.Valid()) {
     BlockHandle handle = index_iter.value().handle;
-    result = handle.offset();
+    return handle.offset();
   } else {
-    // The iterator is past the last key in the file. If table_properties is not
-    // available, approximate the offset by returning the offset of the
-    // metaindex block (which is right near the end of the file).
-    if (rep_->table_properties) {
-      result = rep_->table_properties->data_size;
-    }
-    // table_properties is not present in the table.
-    if (result == 0) {
-      result = rep_->footer.metaindex_handle().offset();
-    }
+    // The iterator is past the last key in the file.
+    return data_size;
   }
+}
 
-  return result;
+uint64_t BlockBasedTable::GetApproximateDataSize() {
+  // Should be in table properties unless super old version
+  if (rep_->table_properties) {
+    return rep_->table_properties->data_size;
+  }
+  // Fall back to rough estimate from footer
+  return rep_->footer.metaindex_handle().offset();
 }
 
 uint64_t BlockBasedTable::ApproximateOffsetOf(const Slice& key,
                                               TableReaderCaller caller) {
+  uint64_t data_size = GetApproximateDataSize();
+  if (UNLIKELY(data_size == 0)) {
+    // Hmm. Let's just split in half to avoid skewing one way or another,
+    // since we don't know whether we're operating on lower bound or
+    // upper bound.
+    return rep_->file_size / 2;
+  }
+
   BlockCacheLookupContext context(caller);
   IndexBlockIter iiter_on_stack;
   ReadOptions ro;
@@ -2952,12 +3044,26 @@ uint64_t BlockBasedTable::ApproximateOffsetOf(const Slice& key,
   }
 
   index_iter->Seek(key);
-  return ApproximateOffsetOf(*index_iter);
+
+  uint64_t offset = ApproximateDataOffsetOf(*index_iter, data_size);
+  // Pro-rate file metadata (incl filters) size-proportionally across data
+  // blocks.
+  double size_ratio =
+      static_cast<double>(offset) / static_cast<double>(data_size);
+  return static_cast<uint64_t>(size_ratio *
+                               static_cast<double>(rep_->file_size));
 }
 
 uint64_t BlockBasedTable::ApproximateSize(const Slice& start, const Slice& end,
                                           TableReaderCaller caller) {
   assert(rep_->internal_comparator.Compare(start, end) <= 0);
+
+  uint64_t data_size = GetApproximateDataSize();
+  if (UNLIKELY(data_size == 0)) {
+    // Hmm. Assume whole file is involved, since we have lower and upper
+    // bound.
+    return rep_->file_size;
+  }
 
   BlockCacheLookupContext context(caller);
   IndexBlockIter iiter_on_stack;
@@ -2973,12 +3079,17 @@ uint64_t BlockBasedTable::ApproximateSize(const Slice& start, const Slice& end,
   }
 
   index_iter->Seek(start);
-  uint64_t start_offset = ApproximateOffsetOf(*index_iter);
+  uint64_t start_offset = ApproximateDataOffsetOf(*index_iter, data_size);
   index_iter->Seek(end);
-  uint64_t end_offset = ApproximateOffsetOf(*index_iter);
+  uint64_t end_offset = ApproximateDataOffsetOf(*index_iter, data_size);
 
   assert(end_offset >= start_offset);
-  return end_offset - start_offset;
+  // Pro-rate file metadata (incl filters) size-proportionally across data
+  // blocks.
+  double size_ratio = static_cast<double>(end_offset - start_offset) /
+                      static_cast<double>(data_size);
+  return static_cast<uint64_t>(size_ratio *
+                               static_cast<double>(rep_->file_size));
 }
 
 bool BlockBasedTable::TEST_FilterBlockInCache() const {

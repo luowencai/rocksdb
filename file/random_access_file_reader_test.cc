@@ -15,25 +15,16 @@ namespace ROCKSDB_NAMESPACE {
 class RandomAccessFileReaderTest : public testing::Test {
  public:
   void SetUp() override {
-    test::ResetTmpDirForDirectIO();
+    test::SetupSyncPointsToMockDirectIO();
     env_ = Env::Default();
     fs_ = FileSystem::Default();
     test_dir_ = test::PerThreadDBPath("random_access_file_reader_test");
     ASSERT_OK(fs_->CreateDir(test_dir_, IOOptions(), nullptr));
-    alignment_ = GetAlignment();
+    ComputeAndSetAlignment();
   }
 
   void TearDown() override {
     EXPECT_OK(test::DestroyDir(env_, test_dir_));
-  }
-
-  bool IsDirectIOSupported() {
-    Write(".direct", "");
-    FileOptions opt;
-    opt.use_direct_reads = true;
-    std::unique_ptr<FSRandomAccessFile> f;
-    auto s = fs_->NewRandomAccessFile(Path(".direct"), opt, &f, nullptr);
-    return s.ok();
   }
 
   void Write(const std::string& fname, const std::string& content) {
@@ -72,23 +63,20 @@ class RandomAccessFileReaderTest : public testing::Test {
     return test_dir_ + "/" + fname;
   }
 
-  size_t GetAlignment() {
+  void ComputeAndSetAlignment() {
     std::string f = "get_alignment";
     Write(f, "");
     std::unique_ptr<RandomAccessFileReader> r;
     Read(f, FileOptions(), &r);
-    size_t alignment = r->file()->GetRequiredBufferAlignment();
+    alignment_ = r->file()->GetRequiredBufferAlignment();
     EXPECT_OK(fs_->DeleteFile(Path(f), IOOptions(), nullptr));
-    return alignment;
   }
 };
 
-TEST_F(RandomAccessFileReaderTest, ReadDirectIO) {
-  if (!IsDirectIOSupported()) {
-    printf("Direct IO is not supported, skip this test\n");
-    return;
-  }
+// Skip the following tests in lite mode since direct I/O is unsupported.
+#ifndef ROCKSDB_LITE
 
+TEST_F(RandomAccessFileReaderTest, ReadDirectIO) {
   std::string fname = "read-direct-io";
   Random rand(0);
   std::string content;
@@ -106,17 +94,13 @@ TEST_F(RandomAccessFileReaderTest, ReadDirectIO) {
   Slice result;
   AlignedBuf buf;
   for (bool for_compaction : {true, false}) {
-    ASSERT_OK(r->Read(offset, len, &result, nullptr, &buf, for_compaction));
+    ASSERT_OK(r->Read(IOOptions(), offset, len, &result, nullptr, &buf,
+                      for_compaction));
     ASSERT_EQ(result.ToString(), content.substr(offset, len));
   }
 }
 
 TEST_F(RandomAccessFileReaderTest, MultiReadDirectIO) {
-  if (!IsDirectIOSupported()) {
-    printf("Direct IO is not supported, skip this test\n");
-    return;
-  }
-
   // Creates a file with 3 pages.
   std::string fname = "multi-read-direct-io";
   Random rand(0);
@@ -152,7 +136,8 @@ TEST_F(RandomAccessFileReaderTest, MultiReadDirectIO) {
     reqs.push_back(std::move(r0));
     reqs.push_back(std::move(r1));
     AlignedBuf aligned_buf;
-    ASSERT_OK(r->MultiRead(reqs.data(), reqs.size(), &aligned_buf));
+    ASSERT_OK(
+        r->MultiRead(IOOptions(), reqs.data(), reqs.size(), &aligned_buf));
 
     AssertResult(content, reqs);
   }
@@ -189,7 +174,8 @@ TEST_F(RandomAccessFileReaderTest, MultiReadDirectIO) {
     reqs.push_back(std::move(r1));
     reqs.push_back(std::move(r2));
     AlignedBuf aligned_buf;
-    ASSERT_OK(r->MultiRead(reqs.data(), reqs.size(), &aligned_buf));
+    ASSERT_OK(
+        r->MultiRead(IOOptions(), reqs.data(), reqs.size(), &aligned_buf));
 
     AssertResult(content, reqs);
   }
@@ -226,7 +212,8 @@ TEST_F(RandomAccessFileReaderTest, MultiReadDirectIO) {
     reqs.push_back(std::move(r1));
     reqs.push_back(std::move(r2));
     AlignedBuf aligned_buf;
-    ASSERT_OK(r->MultiRead(reqs.data(), reqs.size(), &aligned_buf));
+    ASSERT_OK(
+        r->MultiRead(IOOptions(), reqs.data(), reqs.size(), &aligned_buf));
 
     AssertResult(content, reqs);
   }
@@ -255,11 +242,14 @@ TEST_F(RandomAccessFileReaderTest, MultiReadDirectIO) {
     reqs.push_back(std::move(r0));
     reqs.push_back(std::move(r1));
     AlignedBuf aligned_buf;
-    ASSERT_OK(r->MultiRead(reqs.data(), reqs.size(), &aligned_buf));
+    ASSERT_OK(
+        r->MultiRead(IOOptions(), reqs.data(), reqs.size(), &aligned_buf));
 
     AssertResult(content, reqs);
   }
 }
+
+#endif  // ROCKSDB_LITE
 
 }  // namespace ROCKSDB_NAMESPACE
 

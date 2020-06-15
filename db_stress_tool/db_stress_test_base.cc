@@ -1729,6 +1729,8 @@ void StressTest::PrintEnv() const {
           static_cast<int>(FLAGS_level_compaction_dynamic_level_bytes));
   fprintf(stdout, "Read fault one in         : %d\n", FLAGS_read_fault_one_in);
   fprintf(stdout, "Sync fault injection      : %d\n", FLAGS_sync_fault_injection);
+  fprintf(stdout, "Best efforts recovery     : %d\n",
+          static_cast<int>(FLAGS_best_efforts_recovery));
 
   fprintf(stdout, "------------------------------------------------\n");
 }
@@ -1803,6 +1805,8 @@ void StressTest::Open() {
     options_.compression_opts.max_dict_bytes = FLAGS_compression_max_dict_bytes;
     options_.compression_opts.zstd_max_train_bytes =
         FLAGS_compression_zstd_max_train_bytes;
+    options_.compression_opts.parallel_threads =
+        FLAGS_compression_parallel_threads;
     options_.create_if_missing = true;
     options_.max_manifest_file_size = FLAGS_max_manifest_file_size;
     options_.inplace_update_support = FLAGS_in_place_update;
@@ -1910,6 +1914,8 @@ void StressTest::Open() {
   } else {
     options_.merge_operator = MergeOperators::CreatePutOperator();
   }
+
+  options_.best_efforts_recovery = FLAGS_best_efforts_recovery;
 
   fprintf(stdout, "DB path: [%s]\n", FLAGS_db.c_str());
 

@@ -1820,6 +1820,8 @@ Status DB::Put(const WriteOptions& opt, ColumnFamilyHandle* column_family,
   const Slice* ts = opt.timestamp;
   assert(nullptr != ts);
   size_t ts_sz = ts->size();
+  assert(column_family->GetComparator());
+  assert(ts_sz == column_family->GetComparator()->timestamp_size());
   WriteBatch batch(key.size() + ts_sz + value.size() + 24, /*max_bytes=*/0,
                    ts_sz);
   Status s = batch.Put(column_family, key, value);
@@ -1835,8 +1837,30 @@ Status DB::Put(const WriteOptions& opt, ColumnFamilyHandle* column_family,
 
 Status DB::Delete(const WriteOptions& opt, ColumnFamilyHandle* column_family,
                   const Slice& key) {
-  WriteBatch batch;
-  batch.Delete(column_family, key);
+  if (nullptr == opt.timestamp) {
+    WriteBatch batch;
+    Status s = batch.Delete(column_family, key);
+    if (!s.ok()) {
+      return s;
+    }
+    return Write(opt, &batch);
+  }
+  const Slice* ts = opt.timestamp;
+  assert(ts != nullptr);
+  const size_t ts_sz = ts->size();
+  constexpr size_t kKeyAndValueLenSize = 11;
+  constexpr size_t kWriteBatchOverhead =
+      WriteBatchInternal::kHeader + sizeof(ValueType) + kKeyAndValueLenSize;
+  WriteBatch batch(key.size() + ts_sz + kWriteBatchOverhead, /*max_bytes=*/0,
+                   ts_sz);
+  Status s = batch.Delete(column_family, key);
+  if (!s.ok()) {
+    return s;
+  }
+  s = batch.AssignTimestamp(*ts);
+  if (!s.ok()) {
+    return s;
+  }
   return Write(opt, &batch);
 }
 
